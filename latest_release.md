@@ -1,4 +1,7 @@
 ## What's Changed
 
-### 🐛 Bug Fixes
-- Corrected the slide direction on the Sienci ATC profile so tool changes move in the proper direction.
+### ✨ New Features
+- Switch between metric and imperial units, with a clear METRIC/IMPERIAL badge showing which is active and full imperial conversion throughout
+
+### 🔧 Improvements
+- Tool length sensing now retracts faster by removing the slow 1mm ease-off before the rapid retract
