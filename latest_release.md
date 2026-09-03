@@ -1,4 +1,5 @@
 ## What's Changed
 
-### ✨ New Features
-- Added an Invert reading toggle for the air-pressure sensor
+### 🔧 Improvements
+- Post-release pressure readings now wait for a settle window before being recorded, giving you more accurate results
+- Removed the invert toggle
