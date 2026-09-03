@@ -1,4 +1,4 @@
 ## What's Changed
 
-### 🔧 Improvements
-- Post-home TLS handling is now anchored to the machine origin for more reliable secure connections
+### ✨ New Features
+- Added an Invert reading toggle for the air-pressure sensor
