@@ -1496,20 +1496,20 @@
           </svg>
           <div>
             <strong>Air Pressure is live. The tool sensors are still a preview.</strong>
-            The pressure input is read with <code>M66</code> before the tool change starts and again after every drawbar release — a fault pauses the job with a dialog instead of moving on. Tool Sensor and Tool Holder are recorded here but nothing reads them yet.
+            The pressure input is read with <code>M66</code> once, before the tool change starts — a fault pauses the job with a dialog instead of moving on. Tool Sensor and Tool Holder are recorded here but nothing reads them yet.
           </div>
         </div>
 
         <div class="pa-card">
           <h3 class="pa-card-title">Air Pressure Sensor</h3>
           <p class="pa-card-help">
-            grblHAL aux input the pressure switch is wired to. The list is read from the controller, so it only offers inputs this board actually has. Pick <em>N/A</em> if you don't have one. Pressure is read as <b>OK when the input is LOW</b> (same wiring convention Sienci's macros assume). — invert the port with <code>$370</code> if your switch reads the other way round. Checked once before the tool change starts, and again after each drawbar release. The post-release read waits up to 2 seconds for pressure to return, so the brief dip while the cylinder fills is not a fault; only pressure that stays low pauses the job with a dialog offering Re-check or Abort.
+            grblHAL aux input the pressure switch is wired to. The list is read from the controller, so it only offers inputs this board actually has. Pick <em>N/A</em> if you don't have one. Pressure is read as <b>OK when the input is LOW</b> (same wiring convention Sienci's macros assume). — invert the port with <code>$370</code> if your switch reads the other way round. Checked once, before the tool change starts and before anything moves (the same point Sienci's macros check it): a fault pauses the job with a dialog offering Re-check or Abort.
           </p>
 
           <div class="pa-form-row">
             <label class="pa-form-label" for="pa-adv-input-pres">
               Air Pressure
-              <span class="pa-help-tip" title="Pneumatic supply pressure adequate for the drawbar. Read with M66 before the tool change and after every release — a fault pauses the job rather than moving on with a drawbar that may not have opened.">?</span>
+              <span class="pa-help-tip" title="Pneumatic supply pressure adequate for the drawbar. Read with M66 once, before the tool change starts — a fault pauses the job rather than starting a change the drawbar may not be able to complete.">?</span>
             </label>
             <!-- Options come from the controller's [AUX IO:..] report so a
                  port the board doesn't have can't be picked: M66 with a wait

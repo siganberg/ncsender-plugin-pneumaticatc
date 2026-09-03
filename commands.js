@@ -930,11 +930,18 @@ function auxLineFor(settings, action) {
 
 // === Safety sensors ===
 //
-// Air pressure. The read itself mirrors Sienci's P501 helper:
-// `M66 P<n> L4 Q0.01` waits for the pressure input to read LOW with a 10ms
-// timeout, and a timeout (#5399 == -1) is the fault — pressure OK is the LOW
-// state on their wiring. Invert the port in firmware ($370) if the switch
-// reads the other way round.
+// Air pressure. Mirrors Sienci's P501 helper: `M66 P<n> L4 Q<t>` waits for
+// the pressure input to read LOW, and a timeout (#5399 == -1) is the fault —
+// pressure OK is the LOW state on their wiring. Invert the port in firmware
+// ($370) if the switch reads the other way round.
+//
+// Read ONCE, before anything moves — exactly where Sienci's TC.macro calls
+// G65 P501, and nowhere else. An earlier version also re-read after every
+// drawbar release, and that produced a false "Air Pressure Low" on a real
+// machine: with the drawbar open the input sat HIGH for seconds while the
+// gauge read fine, so a pressure read there does not mean what we wanted it
+// to mean. Sienci verifies the release with the drawbar sensor instead, which
+// is a different input we don't read yet (see PLAN-sienci-safety-inputs.md).
 //
 // P501 parks in a `while` loop until pressure returns, and that's the one
 // thing we can't copy: grblHAL only allows o-word flow control when the
@@ -950,24 +957,12 @@ function auxLineFor(settings, action) {
 // continuing proceeds unverified, so nobody clicks through it believing the
 // check passed.
 //
-// `oNum` is the base for this guard's o-word blocks; each guard site needs
-// its own base, spaced far enough apart not to collide.
-//
-// `waitSec` is how long M66 may wait for the input to reach the OK state
-// before the read counts as a fault. Sienci reads with Q0.01 — but they only
-// read once, before anything moves. We also read after every drawbar
-// release, and that's when a healthy supply sags: the cylinder filling pulls
-// the line below the switch threshold for a moment and it comes right back.
-// A 10 ms window there faults a perfectly good setup (seen in the field as
-// "Air Pressure Low" right after the drawbar opens, gauge reading fine). So
-// the post-release reads get a settle window, and the read only faults if
-// pressure hasn't come back within it. M66 returns as soon as the input is
-// OK, so the window costs nothing when the supply is healthy.
-const PRESSURE_WAIT_PRECHECK_SEC = 0.5;
-const PRESSURE_WAIT_POST_RELEASE_SEC = 2;
-function pressureGuard(settings, oNum, waitSec = PRESSURE_WAIT_POST_RELEASE_SEC) {
+// `oNum` is the base for this guard's o-word blocks. The supply is at rest
+// when this runs, so a short wait is enough: it is either there or it isn't.
+const PRESSURE_WAIT_SEC = 0.5;
+function pressureGuard(settings, oNum) {
   if (settings.pressureInput < 0) return '';
-  const read = `M66 P${settings.pressureInput} L4 Q${waitSec}\n    G4 P0.1`;
+  const read = `M66 P${settings.pressureInput} L4 Q${PRESSURE_WAIT_SEC}\n    G4 P0.1`;
   const retry = (n) => `
     o${n} if [#5399 EQ -1]
       (MSG, PLUGIN_PNEUMATICATC:PRESSURE_FAULT)
@@ -1022,7 +1017,6 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
       G4 P0.5
-      ${pressureGuard(settings, 130)}
       G53 G0 Z${settings.zSafe}
       M61 Q0
     `.trim();
@@ -1036,7 +1030,6 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
     G4 P0.5
     ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
     G4 P0.5
-    ${pressureGuard(settings, 140)}
     G53 G0 Z${settings.zSafe}
     M61 Q0
   `.trim();
@@ -1082,8 +1075,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
   const releaseFirst = drawbarAlreadyReleased ? '' : `
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}
-      G4 P0.5
-      ${pressureGuard(settings, 150)}`;
+      G4 P0.5`;
 
   // Approach-to-engaged sequence differs by chain context AND hold style:
   //   * chainedFromRack=true (Tm→Tn swap, fork or cup): machine is already
@@ -1273,7 +1265,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     #<return_units> = [20 + #<_metric>]
     G21
     M5
-    ${pressureGuard(settings, 120, PRESSURE_WAIT_PRECHECK_SEC)}
+    ${pressureGuard(settings, 120)}
     G53 G0 Z${settings.zSafe}
     ${unloadSection}
     ${loadSection}

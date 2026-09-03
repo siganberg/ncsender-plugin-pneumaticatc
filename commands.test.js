@@ -1728,25 +1728,34 @@ describe('$H + performTlsAfterHome — routed from machine origin', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Pressure read timing. The pre-change read gets a short window (the supply
-// is at rest, it's either there or it isn't); the reads after a drawbar
-// release get a 2 s settle window so the momentary dip while the cylinder
-// fills doesn't fault a healthy supply. Sienci only reads before the change.
+// Air-pressure read placement. Sienci reads pressure once, before the change
+// (G65 P501), and never after firing the drawbar. A read after the release
+// gave a false fault on a real machine (input HIGH for seconds with the
+// drawbar open, gauge fine), so the plugin does the same: one read, up front.
 // ---------------------------------------------------------------------------
-describe('pressure read timing — settle window after a drawbar release', () => {
+describe('pressure read — once before the change, never after a release', () => {
   const settings = buildInitialConfig({ slots: 3, slot1: { x: -115, y: 40 }, slotDistance: 80, pressureInput: 2 });
 
-  test('post-release reads wait up to 2 s for pressure to return', () => {
-    const g = buildLoadTool(settings, 1, calculateSlotPosition(settings, 1), '', false, { x: 0, y: 0 });
-    assert.match(g, /M66 P2 L4 Q2\b/);
-    assert.doesNotMatch(g, /M66 P2 L4 Q0\.01/);
+  test('the program reads pressure exactly once, before any motion', () => {
+    const lines = buildToolChangeProgram(settings, 0, 1);
+    const reads = lines.map((l, i) => [l, i]).filter(([l]) => /M66 P2 L4/.test(l));
+    // First read plus the two re-check reads inside the o-if blocks — all
+    // from the single up-front guard.
+    assert.equal(reads.length, 3, `expected the one guard (3 M66 lines), got ${reads.length}`);
+    const firstMotion = lines.findIndex((l) => /^G53 G[01]/.test(l));
+    assert.ok(reads.every(([, i]) => i < firstMotion), 'every pressure read must come before the first move');
+    assert.match(reads[0][0], /Q0\.5\b/);
   });
 
-  test('the pre-change read uses the short window, and it is the first read', () => {
-    // buildToolChangeProgram returns the formatted line array.
-    const program = buildToolChangeProgram(settings, 0, 1).join('\n');
-    const first = program.match(/M66 P2 L4 Q([0-9.]+)/);
-    assert.ok(first, 'expected a pressure read in the program');
-    assert.equal(first[1], '0.5');
+  test('no pressure read follows the drawbar release in load or unload', () => {
+    const load = buildLoadTool(settings, 1, calculateSlotPosition(settings, 1), '', false, { x: 0, y: 0 });
+    const unload = buildUnloadTool(settings, 1, calculateSlotPosition(settings, 1), { x: 0, y: 0 });
+    assert.doesNotMatch(load, /M66/);
+    assert.doesNotMatch(unload, /M66/);
+  });
+
+  test('no sensor configured: no M66 anywhere', () => {
+    const s = buildInitialConfig({ slots: 3, slot1: { x: -115, y: 40 }, slotDistance: 80, pressureInput: -1 });
+    assert.doesNotMatch(buildToolChangeProgram(s, 0, 1).join('\n'), /M66/);
   });
 });
