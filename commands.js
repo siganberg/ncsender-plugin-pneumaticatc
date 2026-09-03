@@ -194,6 +194,10 @@ const buildInitialConfig = (raw = {}) => {
     // grblHAL aux INPUT carrying the air-pressure switch. -1 = no sensor
     // wired, which disables every pressure check.
     pressureInput: sanitizeAuxInput(raw.pressureInput),
+    // Flip the reading: by default pressure OK is the input LOW (Sienci's
+    // wiring convention). Some switches close the other way, so with this
+    // on, pressure OK is HIGH and the fault is the LOW reading.
+    pressureInverted: !!raw.pressureInverted,
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -933,8 +937,9 @@ function auxLineFor(settings, action) {
 // Air pressure. The read itself mirrors Sienci's P501 helper:
 // `M66 P<n> L4 Q0.01` waits for the pressure input to read LOW with a 10ms
 // timeout, and a timeout (#5399 == -1) is the fault — pressure OK is the LOW
-// state on their wiring. Invert the port in firmware ($370) if the switch
-// reads the other way round.
+// state on their wiring. With `pressureInverted` on, the wait flips to L3
+// (wait for HIGH) so a switch that reads the other way round works without
+// touching the firmware's $370 port inversion.
 //
 // P501 parks in a `while` loop until pressure returns, and that's the one
 // thing we can't copy: grblHAL only allows o-word flow control when the
@@ -954,7 +959,8 @@ function auxLineFor(settings, action) {
 // its own base, spaced far enough apart not to collide.
 function pressureGuard(settings, oNum) {
   if (settings.pressureInput < 0) return '';
-  const read = `M66 P${settings.pressureInput} L4 Q0.01\n    G4 P0.1`;
+  const wait = settings.pressureInverted ? 'L3' : 'L4';
+  const read = `M66 P${settings.pressureInput} ${wait} Q0.01\n    G4 P0.1`;
   const retry = (n) => `
     o${n} if [#5399 EQ -1]
       (MSG, PLUGIN_PNEUMATICATC:PRESSURE_FAULT)

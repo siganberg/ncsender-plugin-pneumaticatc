@@ -1503,7 +1503,7 @@
         <div class="pa-card">
           <h3 class="pa-card-title">Air Pressure Sensor</h3>
           <p class="pa-card-help">
-            grblHAL aux input the pressure switch is wired to. The list is read from the controller, so it only offers inputs this board actually has. Pick <em>N/A</em> if you don't have one. Pressure is read as <b>OK when the input is LOW</b> (same wiring convention Sienci's macros assume) — invert the port with <code>$370</code> if your switch reads the other way round. Checked once before the tool change starts, and again after each drawbar release: a fault pauses the job with a dialog offering Re-check or Abort.
+            grblHAL aux input the pressure switch is wired to. The list is read from the controller, so it only offers inputs this board actually has. Pick <em>N/A</em> if you don't have one. Pressure is read as <b>OK when the input is LOW</b> (same wiring convention Sienci's macros assume). If your switch reads the other way round — the Air Pressure Low dialog appears while the gauge shows good pressure — turn on <em>Invert reading</em> below. Checked once before the tool change starts, and again after each drawbar release: a fault pauses the job with a dialog offering Re-check or Abort.
           </p>
 
           <div class="pa-form-row">
@@ -1518,6 +1518,21 @@
             <select id="pa-adv-input-pres" class="pa-select pa-adv-pin">
               <option value="">N/A</option>
             </select>
+          </div>
+
+          <!-- Deliberately not part of the profile lock: the Sienci kit fixes
+               which pin the switch is on, but a switch or wiring that reads
+               the other way round is still a real-world possibility on that
+               kit, so this stays editable even when the pin is locked. -->
+          <div class="pa-field-inline" style="margin-top: 12px;">
+            <label for="pa-adv-input-pres-inv">
+              Invert reading
+              <span class="pa-help-tip" title="Off: pressure is OK when the input reads LOW (M66 waits for LOW). On: pressure is OK when the input reads HIGH (M66 waits for HIGH). Turn this on if the Air Pressure Low dialog appears while the supply is actually fine.">?</span>
+            </label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-adv-input-pres-inv">
+              <span class="pa-toggle-slider"></span>
+            </label>
           </div>
         </div>
 
@@ -2534,6 +2549,7 @@
     // Air-pressure sensor input (-1 / missing = no sensor = blank field).
     var savedPres = initialConfig.pressureInput;
     setPressurePin((typeof savedPres === 'number' && savedPres >= 0) ? savedPres : '');
+    $('pa-adv-input-pres-inv').checked = !!initialConfig.pressureInverted;
 
     // Profile last, so it can lock/overwrite the pin fields it owns. Silent:
     // restoring saved state isn't a user edit.
@@ -2646,6 +2662,8 @@
         var n = Number.parseInt(sel ? sel.value : '', 10);
         return Number.isFinite(n) && n >= 0 ? n : -1;
       })(),
+      // Flip the M66 wait (LOW → HIGH) for a switch wired the other way.
+      pressureInverted: $('pa-adv-input-pres-inv').checked,
       rackHolding: $('pa-rack-holding').value || 'Fork',
 
       orientation: segOrientation ? segOrientation.get() : 'Y',

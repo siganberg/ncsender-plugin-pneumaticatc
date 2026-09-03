@@ -1725,3 +1725,38 @@ describe('$H + performTlsAfterHome — routed from machine origin', () => {
     assert.ok(!gcode.includes('1234.75'), 'stale Y leaked into the program');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Air-pressure inversion. Default wiring reads pressure OK as LOW, so the
+// guard waits for LOW (`L4`) and a timeout is the fault. A switch wired the
+// other way round reports OK as HIGH: with `pressureInverted` the same guard
+// waits for HIGH (`L3`) instead. Nothing else about the guard changes.
+// ---------------------------------------------------------------------------
+describe('pressureInverted — flips the M66 wait mode', () => {
+  const base = { slots: 3, slot1: { x: -115, y: 40 }, slotDistance: 80, pressureInput: 2 };
+  const loadWith = (extra) => {
+    const settings = buildInitialConfig({ ...base, ...extra });
+    return buildLoadTool(settings, 1, calculateSlotPosition(settings, 1), '', false, { x: 0, y: 0 });
+  };
+
+  test('defaults to off and waits for LOW', () => {
+    assert.equal(buildInitialConfig(base).pressureInverted, false);
+    const g = loadWith({});
+    assert.match(g, /M66 P2 L4 Q0\.01/);
+    assert.doesNotMatch(g, /M66 P2 L3/);
+  });
+
+  test('inverted waits for HIGH on every read, including the re-checks', () => {
+    const g = loadWith({ pressureInverted: true });
+    assert.doesNotMatch(g, /M66 P2 L4/);
+    const reads = g.match(/M66 P2 L3 Q0\.01/g) || [];
+    assert.ok(reads.length >= 3, `expected first read + two re-checks, got ${reads.length}`);
+    // The fault test is unchanged: a timeout is still the fault.
+    assert.match(g, /if \[#5399 EQ -1\]/);
+  });
+
+  test('no sensor configured: inversion is moot and no M66 is emitted', () => {
+    const g = loadWith({ pressureInput: -1, pressureInverted: true });
+    assert.doesNotMatch(g, /M66/);
+  });
+});
