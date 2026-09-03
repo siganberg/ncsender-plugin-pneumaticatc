@@ -194,10 +194,6 @@ const buildInitialConfig = (raw = {}) => {
     // grblHAL aux INPUT carrying the air-pressure switch. -1 = no sensor
     // wired, which disables every pressure check.
     pressureInput: sanitizeAuxInput(raw.pressureInput),
-    // Flip the reading: by default pressure OK is the input LOW (Sienci's
-    // wiring convention). Some switches close the other way, so with this
-    // on, pressure OK is HIGH and the fault is the LOW reading.
-    pressureInverted: !!raw.pressureInverted,
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -937,9 +933,8 @@ function auxLineFor(settings, action) {
 // Air pressure. The read itself mirrors Sienci's P501 helper:
 // `M66 P<n> L4 Q0.01` waits for the pressure input to read LOW with a 10ms
 // timeout, and a timeout (#5399 == -1) is the fault — pressure OK is the LOW
-// state on their wiring. With `pressureInverted` on, the wait flips to L3
-// (wait for HIGH) so a switch that reads the other way round works without
-// touching the firmware's $370 port inversion.
+// state on their wiring. Invert the port in firmware ($370) if the switch
+// reads the other way round.
 //
 // P501 parks in a `while` loop until pressure returns, and that's the one
 // thing we can't copy: grblHAL only allows o-word flow control when the
@@ -957,10 +952,22 @@ function auxLineFor(settings, action) {
 //
 // `oNum` is the base for this guard's o-word blocks; each guard site needs
 // its own base, spaced far enough apart not to collide.
-function pressureGuard(settings, oNum) {
+//
+// `waitSec` is how long M66 may wait for the input to reach the OK state
+// before the read counts as a fault. Sienci reads with Q0.01 — but they only
+// read once, before anything moves. We also read after every drawbar
+// release, and that's when a healthy supply sags: the cylinder filling pulls
+// the line below the switch threshold for a moment and it comes right back.
+// A 10 ms window there faults a perfectly good setup (seen in the field as
+// "Air Pressure Low" right after the drawbar opens, gauge reading fine). So
+// the post-release reads get a settle window, and the read only faults if
+// pressure hasn't come back within it. M66 returns as soon as the input is
+// OK, so the window costs nothing when the supply is healthy.
+const PRESSURE_WAIT_PRECHECK_SEC = 0.5;
+const PRESSURE_WAIT_POST_RELEASE_SEC = 2;
+function pressureGuard(settings, oNum, waitSec = PRESSURE_WAIT_POST_RELEASE_SEC) {
   if (settings.pressureInput < 0) return '';
-  const wait = settings.pressureInverted ? 'L3' : 'L4';
-  const read = `M66 P${settings.pressureInput} ${wait} Q0.01\n    G4 P0.1`;
+  const read = `M66 P${settings.pressureInput} L4 Q${waitSec}\n    G4 P0.1`;
   const retry = (n) => `
     o${n} if [#5399 EQ -1]
       (MSG, PLUGIN_PNEUMATICATC:PRESSURE_FAULT)
@@ -1266,7 +1273,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     #<return_units> = [20 + #<_metric>]
     G21
     M5
-    ${pressureGuard(settings, 120)}
+    ${pressureGuard(settings, 120, PRESSURE_WAIT_PRECHECK_SEC)}
     G53 G0 Z${settings.zSafe}
     ${unloadSection}
     ${loadSection}
@@ -1505,6 +1512,7 @@ export {
   rackEntrance, rackExit, cupEntrance, cupExit, tlsEntrance, tlsExit,
   computeKeepoutZone, slotEntryPoint, slotApproachPoint,
   buildLoadTool, buildUnloadTool, buildSlotNav, calculateSlotPosition,
+  buildToolChangeProgram,
   gateSpindleUnclamp,
   createToolLengthSetRoutine, createToolLengthSetProgram,
   routePoint, pickEntryEdge,

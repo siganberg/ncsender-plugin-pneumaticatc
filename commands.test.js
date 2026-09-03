@@ -38,6 +38,7 @@ import {
   tlsEntrance,
   tlsExit,
   buildLoadTool,
+  buildToolChangeProgram,
   buildUnloadTool,
   buildSlotNav,
   calculateSlotPosition,
@@ -1727,36 +1728,25 @@ describe('$H + performTlsAfterHome — routed from machine origin', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Air-pressure inversion. Default wiring reads pressure OK as LOW, so the
-// guard waits for LOW (`L4`) and a timeout is the fault. A switch wired the
-// other way round reports OK as HIGH: with `pressureInverted` the same guard
-// waits for HIGH (`L3`) instead. Nothing else about the guard changes.
+// Pressure read timing. The pre-change read gets a short window (the supply
+// is at rest, it's either there or it isn't); the reads after a drawbar
+// release get a 2 s settle window so the momentary dip while the cylinder
+// fills doesn't fault a healthy supply. Sienci only reads before the change.
 // ---------------------------------------------------------------------------
-describe('pressureInverted — flips the M66 wait mode', () => {
-  const base = { slots: 3, slot1: { x: -115, y: 40 }, slotDistance: 80, pressureInput: 2 };
-  const loadWith = (extra) => {
-    const settings = buildInitialConfig({ ...base, ...extra });
-    return buildLoadTool(settings, 1, calculateSlotPosition(settings, 1), '', false, { x: 0, y: 0 });
-  };
+describe('pressure read timing — settle window after a drawbar release', () => {
+  const settings = buildInitialConfig({ slots: 3, slot1: { x: -115, y: 40 }, slotDistance: 80, pressureInput: 2 });
 
-  test('defaults to off and waits for LOW', () => {
-    assert.equal(buildInitialConfig(base).pressureInverted, false);
-    const g = loadWith({});
-    assert.match(g, /M66 P2 L4 Q0\.01/);
-    assert.doesNotMatch(g, /M66 P2 L3/);
+  test('post-release reads wait up to 2 s for pressure to return', () => {
+    const g = buildLoadTool(settings, 1, calculateSlotPosition(settings, 1), '', false, { x: 0, y: 0 });
+    assert.match(g, /M66 P2 L4 Q2\b/);
+    assert.doesNotMatch(g, /M66 P2 L4 Q0\.01/);
   });
 
-  test('inverted waits for HIGH on every read, including the re-checks', () => {
-    const g = loadWith({ pressureInverted: true });
-    assert.doesNotMatch(g, /M66 P2 L4/);
-    const reads = g.match(/M66 P2 L3 Q0\.01/g) || [];
-    assert.ok(reads.length >= 3, `expected first read + two re-checks, got ${reads.length}`);
-    // The fault test is unchanged: a timeout is still the fault.
-    assert.match(g, /if \[#5399 EQ -1\]/);
-  });
-
-  test('no sensor configured: inversion is moot and no M66 is emitted', () => {
-    const g = loadWith({ pressureInput: -1, pressureInverted: true });
-    assert.doesNotMatch(g, /M66/);
+  test('the pre-change read uses the short window, and it is the first read', () => {
+    // buildToolChangeProgram returns the formatted line array.
+    const program = buildToolChangeProgram(settings, 0, 1).join('\n');
+    const first = program.match(/M66 P2 L4 Q([0-9.]+)/);
+    assert.ok(first, 'expected a pressure read in the program');
+    assert.equal(first[1], '0.5');
   });
 });
