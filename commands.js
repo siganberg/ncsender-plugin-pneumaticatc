@@ -34,6 +34,24 @@ const MAX_SLOTS = 32;
 const DRAWBAR_OFFSET_MM = 1;
 const DRAWBAR_FEEDRATE_MMPM = 300;
 
+// Taper blow / cone clean. On the Sienci kit the taper-blow port is teed off
+// the drawbar valve, so air blasts out through the collet the whole time the
+// drawbar is open. Sienci's TC.macro works with that in three ways, and with
+// `taperBlow` on we do the same:
+//   * unload: lift off the holder, then CLOSE the drawbar right there, so the
+//     blow isn't venting across the whole traverse to the next slot;
+//   * load: arrive above the slot clamped, open the drawbar there, dwell for
+//     the air to vent (and blow the taper), then feed down the last stretch
+//     slowly with the blow running so chips are cleared off the holder;
+//   * a longer settle after the clamp before trusting it.
+// With it off (a spindle with no blow port connected) the chained swap keeps
+// the drawbar open between slots — nothing is venting, so nothing to save.
+// Numbers are Sienci's published values.
+const DEDUST_LIFT_MM = 20;
+const DEDUST_FEEDRATE_MMPM = 1500;
+const DEDUST_VENT_SEC = 0.8;
+const DEDUST_CLAMP_SETTLE_SEC = 1;
+
 const M6_PATTERN = /(?:^|[^A-Z])M0*6(?:\s*T0*(\d+)|(?=[^0-9T])|$)|(?:^|[^A-Z])T0*(\d+)\s*M0*6(?:[^0-9]|$)/i;
 const SLOT_PATTERN = /^\$SLOT0*(\d+)$/i;
 
@@ -194,6 +212,9 @@ const buildInitialConfig = (raw = {}) => {
     // grblHAL aux INPUT carrying the air-pressure switch. -1 = no sensor
     // wired, which disables every pressure check.
     pressureInput: sanitizeAuxInput(raw.pressureInput),
+    // Taper blow / cone clean plumbed off the drawbar valve (Sienci kit).
+    // See DEDUST_* above for what it changes in the sequence.
+    taperBlow: !!raw.taperBlow,
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -1010,13 +1031,20 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
   const drawbarBackoff = `
       G53 G1 Z${settings.slot1.z + DRAWBAR_OFFSET_MM} F${DRAWBAR_FEEDRATE_MMPM}`;
 
+  // Taper blow: lift clear of the holder, then close the drawbar so the
+  // blow stops here instead of venting all the way to the next slot.
+  const closeAfterLiftOff = settings.taperBlow ? `
+      G53 G0 Z${settings.slot1.z + DEDUST_LIFT_MM}
+      ${auxLineFor(settings, 'clamp')}
+      G4 P0.5` : '';
+
   if (settings.rackHolding === 'Cup') {
     return `
       ${cupEntrance(slotPos.engaged, origin, settings)}
       G53 G0 Z${settings.slot1.z}
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
-      G4 P0.5
+      G4 P0.5${closeAfterLiftOff}
       G53 G0 Z${settings.zSafe}
       M61 Q0
     `.trim();
@@ -1029,7 +1057,7 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
     G53 G1 X${slotPos.engaged.x} Y${slotPos.engaged.y} F${feed}
     G4 P0.5
     ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
-    G4 P0.5
+    G4 P0.5${closeAfterLiftOff}
     G53 G0 Z${settings.zSafe}
     M61 Q0
   `.trim();
@@ -1104,13 +1132,26 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
   const drawbarSeat = `
       G53 G1 Z${settings.slot1.z} F${DRAWBAR_FEEDRATE_MMPM}`;
 
+  // Descent onto the holder. Taper blow: the drawbar was closed after the
+  // unload (or is closed from rest), so open it here, directly above the
+  // holder, let the air vent and blow the taper, then feed down the last
+  // stretch slowly with the blow running. Otherwise: whatever release the
+  // caller decided on, then a rapid to the approach height.
+  const descend = settings.taperBlow ? `
+      G53 G0 Z${settings.slot1.z + DEDUST_LIFT_MM}
+      G4 P0.1
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P${DEDUST_VENT_SEC}
+      G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
+      G53 G0 Z${approachZ}`;
+  const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
+
   if (settings.rackHolding === 'Cup') {
     return `
-      ${approachToEngaged}${releaseFirst}
-      G53 G0 Z${approachZ}
+      ${approachToEngaged}${descend}
       G4 P0.5
       ${auxLineFor(settings, 'clamp')}${drawbarSeat}
-      G4 P0.5
+      G4 P${clampSettle}
       G53 G0 Z${settings.zSafe}
       M61 Q${toolNumber}
       ${tlsRoutine}
@@ -1119,11 +1160,10 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
 
   const feed = slideFeedrate(settings);
   return `
-    ${approachToEngaged}${releaseFirst}
-    G53 G0 Z${approachZ}
+    ${approachToEngaged}${descend}
     G4 P0.5
     ${auxLineFor(settings, 'clamp')}${drawbarSeat}
-    G4 P0.5
+    G4 P${clampSettle}
     G53 G1 X${slotPos.approach.x} Y${slotPos.approach.y} F${feed}
     G53 G0 Z${settings.zSafe}
     M61 Q${toolNumber}
@@ -1206,7 +1246,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // Otherwise: any unload path — rack or manual — leaves the drawbar
   // released, and a manual load that follows uses the CLAMP dialog.
   const isManualToManual = currentTool > settings.slots && toolNumber > settings.slots;
-  const drawbarAlreadyReleased = currentTool > 0;
+  // A rack unload with the taper blow on re-clamps after lifting off, so
+  // the drawbar is NOT left open for the load that follows.
+  const rackUnloadReclamped = settings.taperBlow && currentTool > 0 && currentTool <= settings.slots;
+  const drawbarAlreadyReleased = currentTool > 0 && !rackUnloadReclamped;
   const unloadSection = isManualToManual
     ? ''
     : buildUnloadTool(settings, currentTool, sourceSlot, origin);
@@ -1229,7 +1272,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // Tx → T0 leaves the drawbar released after the unload (there is no
   // load section to re-clamp). Restore the fail-safe clamped state so
   // the spindle isn't sitting with the collet open at rest.
-  const finalizeUnclamped = (toolNumber === 0 && unloadSection)
+  const finalizeUnclamped = (toolNumber === 0 && unloadSection && !rackUnloadReclamped)
     ? `G4 P0.5\n    ${auxLineFor(settings, 'clamp')}\n    G4 P0.5`
     : '';
 

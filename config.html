@@ -520,6 +520,7 @@
   /* Segment (Orientation / Direction) locked by profile — swallow clicks
      so the locked value can't be changed, and dim slightly for the
      same "read-only kit setting" cue the pin selectors use. */
+  .pa-toggle.pa-locked { opacity: 0.55; pointer-events: none; }
   .pa-segment.pa-locked {
     opacity: 0.85;
     pointer-events: none;
@@ -1521,6 +1522,23 @@
           </div>
         </div>
 
+        <div class="pa-card" id="pa-adv-taper-blow-card">
+          <h3 class="pa-card-title">Taper Blow / Cone Clean</h3>
+          <p class="pa-card-help">
+            Turn this on if the spindle's taper-blow port is plumbed off the drawbar valve, so air blasts through the collet whenever the drawbar is open (this is how the Sienci kit is plumbed). The sequence then closes the drawbar as soon as it lifts off an unloaded holder, so the blow isn't hissing across the whole traverse to the next slot, opens it again directly above the next holder, waits 0.8 s for the air to vent and blow the taper, and feeds the last 20 mm down slowly with the blow running to clear chips off the holder. Leave it off if nothing is connected to the blow port: the drawbar then stays open between slots, which costs nothing when no air is venting.
+          </p>
+          <div class="pa-field-inline">
+            <label for="pa-adv-taper-blow">
+              Taper blow / cone clean
+              <span class="pa-help-tip" title="On: close the drawbar after lifting off an unloaded holder, re-open it above the next holder, vent for 0.8 s, then feed the last 20 mm down at 1500 mm/min with the blow running. Fixed on for the Sienci ATC profile.">?</span>
+            </label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-adv-taper-blow">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
         <div class="pa-card pa-advanced-preview" id="pa-adv-sensors">
           <h3 class="pa-card-title">Tool Sensors<sup class="pa-title-sup">Coming soon</sup></h3>
           <p class="pa-card-help">
@@ -1776,7 +1794,7 @@
     // No pressure pin by default: a fresh install must not arm a safety check
     // against a sensor that may not exist, or every tool change stops at a
     // dialog the operator never asked for. Pick the pin to turn it on.
-    generic: { clampOut: null, pres: '', tool: 0, holder: 0, locked: false },
+    generic: { clampOut: null, pres: '', tool: 0, holder: 0, locked: false, taperBlow: false },
     // Sienci ATC, from their P200.macro:
     //   _tc_output_db  = 1  (drawbar solenoid — our clamp aux output)
     //   _tc_input_db   = 0  (drawbar sensor)
@@ -1787,6 +1805,9 @@
     // Fixed wiring on a known kit, so the fields are shown read-only.
     sienci: {
       clampOut: '1', pres: 2, tool: 0, holder: 0, locked: true,
+      // The kit's taper-blow port is teed off the drawbar valve, so the
+      // blow-aware sequence is the right one and stays on.
+      taperBlow: true,
       // Physical rack geometry on the Sienci kit is also fixed: rack
       // sits along +X with 90 mm between adjacent slots, holders sit
       // in fork mounts (side-entry) rather than cup drops. Sienci
@@ -1844,9 +1865,20 @@
       setAdvPin('pa-adv-input-tool', p.tool);
       setAdvPin('pa-adv-input-holder', p.holder);
       if (p.clampOut !== null) setClampAux(p.clampOut);
+      if (typeof p.taperBlow === 'boolean') $('pa-adv-taper-blow').checked = p.taperBlow;
     }
 
     var locked = !!p.locked;
+
+    // Taper blow follows the profile lock like the pins do: a known kit's
+    // plumbing decides it, so it isn't editable there.
+    (function() {
+      var tb = $('pa-adv-taper-blow');
+      if (!tb) return;
+      tb.disabled = locked;
+      var wrap = tb.closest('.pa-toggle');
+      if (wrap) wrap.classList.toggle('pa-locked', locked);
+    })();
     ['pa-adv-input-pres', 'pa-adv-input-tool', 'pa-adv-input-holder', 'pa-clamp-aux']
       .forEach(function(id) {
         var el = $(id);
@@ -2534,6 +2566,7 @@
     // Air-pressure sensor input (-1 / missing = no sensor = blank field).
     var savedPres = initialConfig.pressureInput;
     setPressurePin((typeof savedPres === 'number' && savedPres >= 0) ? savedPres : '');
+    $('pa-adv-taper-blow').checked = !!initialConfig.taperBlow;
 
     // Profile last, so it can lock/overwrite the pin fields it owns. Silent:
     // restoring saved state isn't a user edit.
@@ -2646,6 +2679,8 @@
         var n = Number.parseInt(sel ? sel.value : '', 10);
         return Number.isFinite(n) && n >= 0 ? n : -1;
       })(),
+      // Taper blow / cone clean plumbed off the drawbar valve.
+      taperBlow: $('pa-adv-taper-blow').checked,
       rackHolding: $('pa-rack-holding').value || 'Fork',
 
       orientation: segOrientation ? segOrientation.get() : 'Y',

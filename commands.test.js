@@ -1759,3 +1759,82 @@ describe('pressure read — once before the change, never after a release', () =
     assert.doesNotMatch(buildToolChangeProgram(s, 0, 1).join('\n'), /M66/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Taper blow / cone clean. Sienci's blow port is teed off the drawbar valve,
+// so with `taperBlow` on the sequence matches TC.macro: close the drawbar
+// right after lifting off the unloaded holder, re-open it directly above the
+// next holder, vent 0.8 s, feed the last 20 mm down at 1500, settle 1 s
+// after the clamp. Off keeps the drawbar open across a chained swap.
+// ---------------------------------------------------------------------------
+describe('taperBlow — Sienci-style drawbar handling around the traverse', () => {
+  const base = { slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5, clampAuxOutput: 1 };
+  const on  = buildInitialConfig({ ...base, taperBlow: true });
+  const off = buildInitialConfig({ ...base });
+  const auxOf = (line) => (line.match(/^M6[45] P\d+/) || [])[0];
+
+  test('defaults off', () => {
+    assert.equal(off.taperBlow, false);
+  });
+
+  test('on: the unload closes the drawbar 20 mm above the holder, before leaving for Z-safe', () => {
+    const lines = buildUnloadTool(on, 1, calculateSlotPosition(on, 1), { x: 0, y: 0 }).split('\n').map((l) => l.trim());
+    const lift = lines.findIndex((l) => l === 'G53 G0 Z-80');
+    assert.ok(lift > 0, 'expected a lift to slot Z + 20');
+    assert.match(lines[lift + 1], /^M6[45] P1$/);
+    assert.notEqual(auxOf(lines[lift + 1]), auxOf(lines.find((l) => /^M6[45] P1$/.test(l))), 'the aux after lift-off must be the clamp, i.e. the opposite of the release');
+    const safe = lines.findIndex((l) => l === 'G53 G0 Z-5');
+    assert.ok(safe > lift + 1, 'the clamp happens before the rapid to Z-safe');
+  });
+
+  test('off: the unload leaves the drawbar open and goes straight to Z-safe', () => {
+    const g = buildUnloadTool(off, 1, calculateSlotPosition(off, 1), { x: 0, y: 0 });
+    assert.equal((g.match(/^\s*M6[45] P1$/gm) || []).length, 1, 'only the release, no re-clamp');
+    assert.doesNotMatch(g, /G53 G0 Z-80/);
+  });
+
+  test('on: the load re-opens above the holder, vents 0.8 s, feeds down at 1500 and settles 1 s after clamping', () => {
+    const lines = buildLoadTool(on, 2, calculateSlotPosition(on, 2), '', /* alreadyReleased */ false, { x: 0, y: 0 }, /* chained */ true)
+      .split('\n').map((l) => l.trim());
+    const i = lines.findIndex((l) => l === 'G53 G0 Z-80');
+    assert.ok(i > 0, 'expected a rapid to slot Z + 20 above the holder');
+    assert.equal(lines[i + 1], 'G4 P0.1');
+    assert.match(lines[i + 2], /^M6[45] P1$/, 'release directly above the holder');
+    assert.equal(lines[i + 3], 'G4 P0.8', 'vent / blow dwell');
+    assert.equal(lines[i + 4], 'G53 G1 Z-99 F1500', 'slow dedust feed to the approach height');
+    assert.ok(lines.includes('G4 P1'), '1 s settle after the clamp');
+  });
+
+  test('off: a chained load skips the release and rapids to the approach height', () => {
+    const g = buildLoadTool(off, 2, calculateSlotPosition(off, 2), '', true, { x: 0, y: 0 }, true);
+    assert.doesNotMatch(g, /G4 P0\.8/);
+    assert.doesNotMatch(g, /F1500/);
+    assert.equal((g.match(/^\s*M6[45] P1$/gm) || []).length, 1, 'only the clamp');
+  });
+
+  test('on: a full T1 -> T2 program has air off for the traverse between the slots', () => {
+    const lines = buildToolChangeProgram(on, 1, 2);
+    const aux = lines.map((l, i) => [l.trim(), i]).filter(([l]) => /^M6[45] P1$/.test(l));
+    // release (unload) -> clamp (after lift-off) -> release (above slot 2) -> clamp (seat)
+    assert.equal(aux.length, 4, `expected 4 drawbar switches, got ${aux.length}: ${aux.map(([l]) => l).join(' ')}`);
+    assert.equal(aux[0][0], aux[2][0], 'first and third are releases');
+    assert.equal(aux[1][0], aux[3][0], 'second and fourth are clamps');
+    assert.notEqual(aux[0][0], aux[1][0]);
+    // The traverse (the par-walk to slot 2 engaged at Z-safe) sits between the
+    // first clamp and the second release.
+    const walk = lines.findIndex((l, i) => i > aux[1][1] && /^G53 G0 X/.test(l.trim()));
+    assert.ok(walk > aux[1][1] && walk < aux[2][1], 'the move to slot 2 happens with the drawbar closed');
+  });
+
+  test('on: T1 -> T0 does not double-clamp at the end', () => {
+    const lines = buildToolChangeProgram(on, 1, 0);
+    const aux = lines.map((l) => l.trim()).filter((l) => /^M6[45] P1$/.test(l));
+    assert.equal(aux.length, 2, 'release, then the single clamp after lift-off');
+  });
+
+  test('off: T1 -> T0 still clamps once at the end', () => {
+    const lines = buildToolChangeProgram(off, 1, 0);
+    const aux = lines.map((l) => l.trim()).filter((l) => /^M6[45] P1$/.test(l));
+    assert.equal(aux.length, 2, 'release, then the finalize clamp');
+  });
+});
