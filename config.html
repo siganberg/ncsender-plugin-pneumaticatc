@@ -338,6 +338,13 @@
     color: var(--color-text-primary);
     margin: 0;
   }
+  .pa-field-note {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    color: var(--color-text-secondary);
+  }
   .pa-card-help {
     margin: 0;
     font-size: 0.95rem;
@@ -1040,6 +1047,19 @@
           <span class="pa-nav-label">TLS</span>
           <span class="pa-tab-caret" aria-hidden="true"></span>
         </button>
+        <button type="button" class="pa-nav-btn" data-nav="probe">
+          <span class="pa-nav-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="7"/>
+              <line x1="12" y1="1" x2="12" y2="5"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="1" y1="12" x2="5" y2="12"/>
+              <line x1="19" y1="12" x2="23" y2="12"/>
+            </svg>
+          </span>
+          <span class="pa-nav-label">Probe</span>
+          <span class="pa-tab-caret" aria-hidden="true"></span>
+        </button>
         <button type="button" class="pa-nav-btn" data-nav="manual">
           <span class="pa-nav-icon">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1373,6 +1393,93 @@
       </footer>
     </section>
 
+    <!-- ===================== PROBE ===================== -->
+    <section class="pa-content" data-view="probe">
+      <header class="pa-panel-header">
+        <h2 class="pa-panel-title">Probe</h2>
+        <div class="pa-header-cards">
+          <div class="pa-header-card">
+            <div class="pa-mcoord">
+              <div class="pa-mcoord-title">Machine Coordinates</div>
+              <div class="pa-mcoord-row">
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">X</span><span class="pa-mcoord-value pa-axis-x">0.000</span></div>
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">Y</span><span class="pa-mcoord-value pa-axis-y">0.000</span></div>
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">Z</span><span class="pa-mcoord-value pa-axis-z">0.000</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="pa-header-card">
+            <div class="pa-jog-controls">
+              <nc-step-control></nc-step-control>
+              <nc-jog-control></nc-jog-control>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="pa-panel">
+        <div class="pa-card">
+          <h3 class="pa-card-title">Probe Auto-Loader</h3>
+          <p class="pa-card-help">Treats the probe as just another tool: calling its tool number picks it up from its own holder the same way a rack slot would, instead of prompting for a hand swap.</p>
+          <div class="pa-field-inline">
+            <label for="pa-probe-enabled">Enable Probe Auto-Loader</label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-probe-enabled">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="pa-card" id="pa-probe-settings">
+          <h3 class="pa-card-title">Probe Tool</h3>
+          <p class="pa-card-help" id="pa-probe-tool-help">The tool number that loads the probe. It has to sit above the rack so it can't collide with a slot number.</p>
+          <div class="pa-row-3">
+            <div class="pa-field">
+              <label for="pa-probe-tool">Tool Number</label>
+              <input class="pa-input" type="number" id="pa-probe-tool" value="99" min="2" max="99" step="1">
+            </div>
+            <div class="pa-field">
+              <label for="pa-probe-holding">Loading Style</label>
+              <select class="pa-select" id="pa-probe-holding">
+                <option value="Fork" selected>Fork</option>
+                <option value="Cup">Cup</option>
+              </select>
+              <span class="pa-field-note">Same fork/cup motion as the rack, but set independently — the probe's holder doesn't have to match it.</span>
+            </div>
+          </div>
+
+          <div style="margin-top: 16px;">
+            <label class="pa-group-label">Probe Position</label>
+            <div class="pa-coord-row">
+              <div class="pa-coord">
+                <span class="pa-coord-label">X</span>
+                <input class="pa-input" type="number" id="pa-probe-x" value="0" step="0.001">
+              </div>
+              <div class="pa-coord">
+                <span class="pa-coord-label">Y</span>
+                <input class="pa-input" type="number" id="pa-probe-y" value="0" step="0.001">
+              </div>
+              <div class="pa-coord">
+                <span class="pa-coord-label">Z</span>
+                <input class="pa-input" type="number" id="pa-probe-z" value="-100" step="0.001">
+              </div>
+              <button type="button" class="pa-btn pa-btn-sm" id="pa-probe-grab">Grab current</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="pa-card pa-events-card" id="pa-probe-verify-card">
+          <h3 class="pa-card-title">Verify Probe Loaded</h3>
+          <p class="pa-card-help">G-code run after the probe is picked up and before its TLS, to prove the tip actually triggers. Typically a short <code>G38.x</code> against a known surface — catching a dead needle here is what stops the machine driving the probe into the toolsetter later. Leave empty to skip the check.</p>
+          <div id="pa-probe-verify-editor" class="pa-monaco"></div>
+        </div>
+      </div>
+
+      <footer class="pa-panel-footer">
+        <button type="button" class="pa-save-btn" data-save>Save</button>
+      </footer>
+    </section>
+
     <!-- ===================== MANUAL TOOL ===================== -->
     <section class="pa-content" data-view="manual">
       <header class="pa-panel-header">
@@ -1662,7 +1769,8 @@
     'pa-slide-distance', 'pa-slide-speed', 'pa-keepout-padding', 'pa-slot-distance',
     'pa-seek-start-z', 'pa-seek-distance', 'pa-seek-feedrate',
     'pa-slot1-x', 'pa-slot1-y', 'pa-slot1-z', 'pa-slot1-z-custom',
-    'pa-toolsetter-x', 'pa-toolsetter-y', 'pa-manualtool-x', 'pa-manualtool-y'
+    'pa-toolsetter-x', 'pa-toolsetter-y', 'pa-manualtool-x', 'pa-manualtool-y',
+    'pa-probe-x', 'pa-probe-y', 'pa-probe-z'
   ];
   function relaxUnitInput(el) {
     if (!el || UNITS_PREFERENCE !== 'imperial') return;
@@ -1684,7 +1792,7 @@
       qsa('.pa-content').forEach(function(c) {
         c.classList.toggle('active', c.getAttribute('data-view') === target);
       });
-      if (target === 'events') setTimeout(layoutMonaco, 0);
+      if (target === 'events' || target === 'probe') setTimeout(layoutMonaco, 0);
     });
   });
 
@@ -2373,7 +2481,10 @@
 
   $('pa-slots').addEventListener('change', function() {
     if (segLayout && segLayout.get() === 'custom') rebuildSlotTable();
+    updateProbeToolBounds();
   });
+  $('pa-probe-enabled').addEventListener('change', updateProbeEnabledState);
+  $('pa-probe-tool').addEventListener('change', updateProbeToolBounds);
 
   // ---------- Grab buttons (single-coord targets) ----------
   function grabInto(prefix) {
@@ -2392,6 +2503,7 @@
   bindGrab('pa-slot1-grab', 'slot1');
   bindGrab('pa-toolsetter-grab', 'toolsetter');
   bindGrab('pa-manualtool-grab', 'manualtool');
+  bindGrab('pa-probe-grab', 'probe');
 
   // ---------- Machine coord subscription ----------
   function extractCoords(payload) {
@@ -2496,6 +2608,7 @@
   var preTlsEditor = null;
   var postTlsEditor = null;
   var abortEditor = null;
+  var probeVerifyEditor = null;
   function isLight() { return document.body.classList.contains('theme-light'); }
   function initMonaco() {
     if (!window.monaco) return;
@@ -2520,6 +2633,10 @@
     if ($('pa-post-editor'))     postEditor    = monaco.editor.create($('pa-post-editor'),     Object.assign({}, opts, { value: initialConfig.postToolChangeGcode || '' }));
     if ($('pa-pre-tls-editor'))  preTlsEditor  = monaco.editor.create($('pa-pre-tls-editor'),  Object.assign({}, opts, { value: initialConfig.preTlsGcode         || '' }));
     if ($('pa-post-tls-editor')) postTlsEditor = monaco.editor.create($('pa-post-tls-editor'), Object.assign({}, opts, { value: initialConfig.postTlsGcode        || '' }));
+    if ($('pa-probe-verify-editor')) {
+      probeVerifyEditor = monaco.editor.create($('pa-probe-verify-editor'),
+        Object.assign({}, opts, { value: (initialConfig.probe && initialConfig.probe.verifyGcode) || '' }));
+    }
     // Editor shows only the user's addition. Prefer the explicit
     // `abortEventGcodeUser` field; fall back to stripping the
     // leading auto-injected clamp line from `abortEventGcode` for
@@ -2532,16 +2649,19 @@
       abortEditor = monaco.editor.create($('pa-abort-editor'), Object.assign({}, opts, { value: abortInitial || '' }));
     }
     // Mark dirty on any editor content change — feeds the close confirm.
-    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor].forEach(function(e) {
+    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor, probeVerifyEditor].forEach(function(e) {
       if (e && typeof markDirty === 'function') e.onDidChangeModelContent(markDirty);
     });
 
     new MutationObserver(function() {
       monaco.editor.setTheme(isLight() ? 'ncsender-light' : 'ncsender-dark');
     }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+    // applyInitial() ran before this, when probeVerifyEditor was still null.
+    if (typeof updateProbeEnabledState === 'function') updateProbeEnabledState();
   }
   function layoutMonaco() {
-    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor].forEach(function(e) { if (e) e.layout(); });
+    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor, probeVerifyEditor].forEach(function(e) { if (e) e.layout(); });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMonaco);
   else setTimeout(initMonaco, 50);
@@ -2598,6 +2718,18 @@
     $('pa-manualtool-x').value = fmtCoord(manual.x ?? 0);
     $('pa-manualtool-y').value = fmtCoord(manual.y ?? 0);
 
+    var probe = initialConfig.probe || {};
+    $('pa-probe-enabled').checked = !!probe.enabled;
+    $('pa-probe-holding').value = probe.holding || 'Fork';
+    $('pa-probe-x').value = fmtCoord(probe.x ?? 0);
+    $('pa-probe-y').value = fmtCoord(probe.y ?? 0);
+    $('pa-probe-z').value = fmtCoord(probe.z ?? -100);
+    // Seed the number before clamping so a saved value survives; the clamp
+    // only kicks in when the rack has since grown past it.
+    $('pa-probe-tool').value = String(probe.toolNumber ?? PROBE_TOOL_DEFAULT);
+    updateProbeToolBounds();
+    updateProbeEnabledState();
+
     var db = initialConfig.dialogBehavior || {};
     $('pa-dialog-countdown-sec').value = String(typeof db.countdownSec === 'number' ? db.countdownSec : 5);
     $('pa-dialog-chain-steps').checked = !!db.chainSteps;
@@ -2619,6 +2751,50 @@
     });
 
     if (segLayout && segLayout.get() === 'custom') rebuildSlotTable();
+  }
+
+  // ---------- Probe tab ----------
+  // The probe is modelled as one more tool, so its number must sit clear of
+  // every rack slot — slot N is tool N, so the floor is slots + 1. The floor
+  // moves whenever the rack grows, and a number that was legal for a 4-slot
+  // rack is not legal for a 10-slot one, so re-clamp on every slot change.
+  var PROBE_TOOL_DEFAULT = 99;
+
+  function probeToolFloor() {
+    var slots = parseInt($('pa-slots').value, 10);
+    return (Number.isFinite(slots) ? slots : 1) + 1;
+  }
+  function updateProbeToolBounds() {
+    var el = $('pa-probe-tool');
+    if (!el) return;
+    var floor = probeToolFloor();
+    el.min = String(floor);
+    var help = $('pa-probe-tool-help');
+    if (help) {
+      help.textContent = 'The tool number that loads the probe. It has to sit above the rack so '
+        + 'it cannot collide with a slot number — T' + floor + ' or higher with the current '
+        + 'rack size. Default is T' + PROBE_TOOL_DEFAULT + '.';
+    }
+    var n = parseInt(el.value, 10);
+    if (!Number.isFinite(n) || n < floor) el.value = String(Math.max(floor, PROBE_TOOL_DEFAULT));
+  }
+
+  // Everything below the enable toggle is inert until the loader is on.
+  function updateProbeEnabledState() {
+    var on = !!($('pa-probe-enabled') && $('pa-probe-enabled').checked);
+    var card = $('pa-probe-settings');
+    if (card) {
+      card.style.opacity = on ? '' : '0.45';
+      card.style.pointerEvents = on ? '' : 'none';
+    }
+    ['pa-probe-tool', 'pa-probe-holding', 'pa-probe-x', 'pa-probe-y', 'pa-probe-z', 'pa-probe-grab']
+      .forEach(function(id) { var el = $(id); if (el) el.disabled = !on; });
+    var verify = $('pa-probe-verify-card');
+    if (verify) {
+      verify.style.opacity = on ? '' : '0.45';
+      verify.style.pointerEvents = on ? '' : 'none';
+    }
+    if (probeVerifyEditor) probeVerifyEditor.updateOptions({ readOnly: !on });
   }
 
   function updateLabelUnits() {
@@ -2713,6 +2889,21 @@
       manualTool: {
         x: toMetric(parseFloatOr($('pa-manualtool-x').value, 0)),
         y: toMetric(parseFloatOr($('pa-manualtool-y').value, 0))
+      },
+
+      probe: {
+        enabled: $('pa-probe-enabled').checked,
+        // Clamped on the way out too — the field is disabled while the loader
+        // is off, so a stale sub-floor number could otherwise be persisted.
+        toolNumber: Math.max(probeToolFloor(),
+                             parseInt($('pa-probe-tool').value, 10) || PROBE_TOOL_DEFAULT),
+        holding: $('pa-probe-holding').value || 'Fork',
+        x: toMetric(parseFloatOr($('pa-probe-x').value, 0)),
+        y: toMetric(parseFloatOr($('pa-probe-y').value, 0)),
+        z: toMetric(parseFloatOr($('pa-probe-z').value, -100)),
+        verifyGcode: probeVerifyEditor
+          ? probeVerifyEditor.getValue()
+          : ((initialConfig.probe && initialConfig.probe.verifyGcode) || '')
       },
 
       dialogBehavior: {

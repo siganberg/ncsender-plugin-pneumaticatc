@@ -23,6 +23,9 @@ const LAYOUT_MODES = ['linear', 'custom'];
 // Legacy 'first' → migrated to 'library' (same net behavior).
 const TLS_MODES = ['library', 'always'];
 const MAX_SLOTS = 32;
+// Upper bound for the probe's tool number. Matches the config UI's max and
+// the two-digit T-word the macro emits.
+const MAX_TOOL_NUMBER = 99;
 
 // Pneumatic drawbar compensation for CUP-style racks only. On a cup rack
 // the tool holder rests on the cup lip and the drawbar's actuation would
@@ -108,6 +111,30 @@ const sanitizeTlsMode = (value, legacyPerformTlsOnChange) => {
   return legacyPerformTlsOnChange === false ? 'library' : 'always';
 };
 
+// Probe auto-loader. The probe is treated as one more tool, so its number
+// has to clear every rack slot (slot N is tool N) — hence the slots + 1
+// floor. Defaults to T99, the far end of the range, so it stays out of the
+// way no matter how large the rack grows.
+const PROBE_TOOL_DEFAULT = 99;
+const sanitizeProbe = (raw = {}, slots = 1) => {
+  const floor = slots + 1;
+  const parsed = Number.parseInt(raw.toolNumber, 10);
+  const toolNumber = Number.isFinite(parsed)
+    ? Math.min(Math.max(parsed, floor), MAX_TOOL_NUMBER)
+    : Math.max(floor, PROBE_TOOL_DEFAULT);
+  return {
+    enabled: !!raw.enabled,
+    toolNumber,
+    holding: raw.holding === 'Cup' ? 'Cup' : 'Fork',
+    x: toFiniteNumber(raw.x),
+    y: toFiniteNumber(raw.y),
+    z: toFiniteNumber(raw.z, -100),
+    // Runs after the pickup, before the probe's own TLS: a G38.x that proves
+    // the tip triggers. Empty = skip the check.
+    verifyGcode: raw.verifyGcode ?? ''
+  };
+};
+
 const sanitizeCoords2D = (coords = {}) => ({
   x: toFiniteNumber(coords.x),
   y: toFiniteNumber(coords.y)
@@ -190,6 +217,7 @@ const buildInitialConfig = (raw = {}) => {
     slotCoords: raw.slotCoords || [],
     toolsetter: sanitizeCoords2D(raw.toolsetter ?? raw.toolSetter),
     manualTool: sanitizeCoords2D(raw.manualTool),
+    probe: sanitizeProbe(raw.probe, slots),
 
     zSafe: toFiniteNumber(raw.zSafe, 0),
 
