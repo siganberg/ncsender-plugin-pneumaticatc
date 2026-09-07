@@ -48,6 +48,12 @@ import {
   createToolLengthSetProgram,
   routePoint,
   pickEntryEdge,
+  buildProbeLoad,
+  buildProbeUnload,
+  buildProbeDockNav,
+  probeDockPosition,
+  probeDockRestPoint,
+  PROBE_TOOL_NUMBER,
 } from './commands.js';
 
 // Strip comment lines and blank lines so the assertions read against
@@ -1937,5 +1943,287 @@ describe('$MEASURE_TLO — measure-all batch step', () => {
     assert.ok(lines.some((l) => /^M61 Q0$/.test(l)), 'unloads');
     assert.equal(lines.filter((l) => /^G53 G0 X406\.3 Y-489\.287$/.test(l)).length, 1, 'ends at the requested XY');
     assert.ok(!lines.some((l) => /^G38\.2/.test(l)), 'no probe on the way out');
+  });
+});
+
+// ======================================================================
+// 3D probe tool (T99)
+// ======================================================================
+//
+// The probe lives in its own dock outside the rack and is picked up with
+// the drawbar, exactly like a rack tool. These tests pin down the three
+// things that separate it from the manual-swap path it used to fall into:
+//   * the drawbar actually fires (no operator dialog anywhere);
+//   * the dock is reached by a keepout-safe route, from wherever the
+//     spindle really is — not from the stale pre-M6 origin;
+//   * with the probe tool disabled, nothing changes.
+//
+// Dock sits at X=300 — well clear of the RACK fixture's keepout, whose X
+// span is [-175 … -55]. Engaged Z is -120.
+
+const PROBE_RACK = {
+  ...RACK,
+  addProbe: true,
+  clampAuxOutput: 2,          // → M64 P2 releases, M65 P2 clamps
+  rackHolding: 'Fork',
+  slideSpeed: 500,
+  slot1: { x: -115, y: 40, z: -100 },
+  toolsetter: { x: 200, y: 0 },
+  manualTool: { x: 0, y: 0 },
+  zSafe: -5,
+  tlsSeekStartZ: -20,
+  seekDistance: 50,
+  seekFeedrate: 500,
+  tlsMode: 'always',
+  pressureInput: -1,
+  probeDock: { x: 300, y: 150, z: -120 },
+  probeHolding: 'Cup',
+  probeSlideAxis: 'X',
+  probeSlideDirection: 'Negative',
+  probeSlideDistance: 40,
+  probeSlideSpeed: 400,
+  probeLoadGcode: '',
+  probeUnloadGcode: '',
+};
+
+const FORK_DOCK = { ...PROBE_RACK, probeHolding: 'Fork', probeSlideAxis: 'Y' };
+
+describe('probeDockPosition — dock geometry', () => {
+  test('Cup: approach and engaged are the same point (no lateral move)', () => {
+    const pos = probeDockPosition(PROBE_RACK);
+    assert.deepEqual(pos.engaged, { x: 300, y: 150 });
+    assert.deepEqual(pos.approach, { x: 300, y: 150 });
+    assert.deepEqual(probeDockRestPoint(PROBE_RACK), { x: 300, y: 150 });
+  });
+
+  test('Fork: approach sits opposite the slide direction on the slide axis', () => {
+    // slideDirection Negative on axis Y → the tool slides toward -Y to
+    // engage, so the approach is 40 mm to +Y of engaged.
+    const pos = probeDockPosition(FORK_DOCK);
+    assert.deepEqual(pos.engaged, { x: 300, y: 150 });
+    assert.deepEqual(pos.approach, { x: 300, y: 190 });
+    // Rest point after a load/unload is the approach for a fork — the
+    // spindle has slid out before lifting.
+    assert.deepEqual(probeDockRestPoint(FORK_DOCK), { x: 300, y: 190 });
+  });
+
+  test('Fork: the dock slide axis is independent of the rack orientation', () => {
+    // Rack is orientation Y; the dock slides along X here. A dock mounted
+    // at 90° to the magazine must not inherit the rack's axis.
+    const pos = probeDockPosition({ ...FORK_DOCK, probeSlideAxis: 'X' });
+    assert.deepEqual(pos.approach, { x: 340, y: 150 });
+  });
+});
+
+describe('buildProbeLoad — drawbar pickup out of the dock', () => {
+  test('T0 → T99 (Cup): release, descend, clamp, seat — no operator dialog', () => {
+    const gcode = buildProbeLoad(PROBE_RACK, '', /* drawbarAlreadyReleased */ false, { x: 0, y: 0 });
+    const lines = motionLines(gcode);
+
+    // Dock is clear of the keepout from (0,0), so one direct move.
+    assert.equal(lines[0], 'G53 G0 X300 Y150', 'should travel straight over the dock');
+    // Empty spindle → drawbar is in its fail-safe clamped state and must
+    // be opened BEFORE the spindle comes down on the holder.
+    const releaseIdx = lines.indexOf('M64 P2');
+    const approachIdx = lines.indexOf('G53 G0 Z-119');
+    assert.ok(releaseIdx > -1, 'drawbar release should fire');
+    assert.ok(releaseIdx < approachIdx, 'release must come before the descent onto the holder');
+    // Clamp, then the 1 mm G1 seat that overlaps the pneumatic pull-up.
+    const clampIdx = lines.indexOf('M65 P2');
+    assert.ok(clampIdx > approachIdx, 'clamp comes after the descent');
+    assert.equal(lines[clampIdx + 1], 'G53 G1 Z-120 F300', 'drawbar seat should follow the clamp');
+    // Registers as T99 and never asks the operator for anything.
+    assert.ok(lines.includes('M61 Q99'), 'should register tool 99');
+    assert.ok(!lines.includes('M0'), 'a docked probe must not stop for an operator dialog');
+    assert.ok(!gcode.includes('MANUAL_'), 'no manual-swap message should be emitted');
+  });
+
+  test('chained after an unload: the drawbar is already open, so no second release', () => {
+    const gcode = buildProbeLoad(PROBE_RACK, '', /* drawbarAlreadyReleased */ true, { x: 0, y: 0 });
+    const releases = motionLines(gcode).filter(l => l === 'M64 P2');
+    assert.equal(releases.length, 0, 'no redundant release when the drawbar is already open');
+  });
+
+  test('Fork dock: slides out to the approach point after clamping, before lifting', () => {
+    const gcode = buildProbeLoad(FORK_DOCK, '', true, { x: 0, y: 0 });
+    const lines = motionLines(gcode);
+    const clampIdx = lines.indexOf('M65 P2');
+    const slideIdx = lines.indexOf('G53 G1 X300 Y190 F400');
+    const liftIdx = lines.indexOf('G53 G0 Z-5');
+    assert.ok(slideIdx > clampIdx, 'slide-out must happen after the tool is gripped');
+    assert.ok(liftIdx > slideIdx, 'lift to safe Z must happen after the slide-out');
+  });
+
+  test('Load Probe G-code runs after M61, before the TLS routine', () => {
+    const gcode = buildProbeLoad(
+      { ...PROBE_RACK, probeLoadGcode: 'M64 P5\nG4 P2' },
+      '(TLS ROUTINE)', true, { x: 0, y: 0 }
+    );
+    const lines = motionLines(gcode);
+    const m61 = lines.indexOf('M61 Q99');
+    const wake = lines.indexOf('M64 P5');
+    assert.ok(wake > m61, 'user g-code should run once the probe is registered');
+    assert.ok(lines.indexOf('G4 P2') === wake + 1, 'multi-line user g-code should be kept in order');
+    assert.ok(gcode.indexOf('M64 P5') < gcode.indexOf('(TLS ROUTINE)'), 'probe wake-up precedes the TLS routine');
+  });
+});
+
+describe('buildProbeUnload — drawbar release back into the dock', () => {
+  test('T99 → T0 (Cup): descend, release, back off, lift, deregister', () => {
+    const gcode = buildProbeUnload(PROBE_RACK, { x: 0, y: 0 });
+    const lines = motionLines(gcode);
+    assert.equal(lines[0], 'G53 G0 X300 Y150', 'travel to the dock');
+    assert.equal(lines[1], 'G53 G0 Z-120', 'descend to the engaged Z');
+    const releaseIdx = lines.indexOf('M64 P2');
+    assert.ok(releaseIdx > -1, 'drawbar should release');
+    assert.equal(lines[releaseIdx + 1], 'G53 G1 Z-119 F300',
+      'drawbar back-off keeps the holder on the dock while the tang is pushed down');
+    assert.ok(lines.includes('M61 Q0'), 'spindle should be registered empty');
+    assert.ok(!lines.includes('M0'), 'no operator dialog');
+  });
+
+  test('Fork dock: Z descends first, then slides in at depth', () => {
+    const lines = motionLines(buildProbeUnload(FORK_DOCK, { x: 0, y: 0 }));
+    assert.equal(lines[0], 'G53 G0 X300 Y190', 'travel to the approach point');
+    assert.equal(lines[1], 'G53 G0 Z-120', 'descend before sliding in');
+    assert.equal(lines[2], 'G53 G1 X300 Y150 F400', 'slide into the fork at depth');
+  });
+
+  test('Unload Probe G-code runs before the spindle leaves for the dock', () => {
+    const gcode = buildProbeUnload({ ...PROBE_RACK, probeUnloadGcode: 'M65 P5' }, { x: 0, y: 0 });
+    const lines = motionLines(gcode);
+    assert.equal(lines[0], 'M65 P5', 'probe should be put to sleep while still in the spindle');
+    assert.equal(lines[1], 'G53 G0 X300 Y150');
+  });
+
+  test('taperBlow re-clamps at the dock instead of venting across the traverse', () => {
+    const lines = motionLines(buildProbeUnload({ ...PROBE_RACK, taperBlow: true }, { x: 0, y: 0 }));
+    const releaseIdx = lines.indexOf('M64 P2');
+    const liftIdx = lines.indexOf('G53 G0 Z-100');   // dockZ + DEDUST_LIFT_MM
+    const clampIdx = lines.indexOf('M65 P2');
+    assert.ok(liftIdx > releaseIdx, 'lift clear of the holder after releasing');
+    assert.ok(clampIdx > liftIdx, 'close the drawbar at the dock, before travelling');
+  });
+});
+
+describe('buildToolChangeProgram — probe dock integration', () => {
+  test('T0 → T99 probes on the toolsetter per the TLS strategy', () => {
+    const lines = motionLines(
+      buildToolChangeProgram(PROBE_RACK, 0, PROBE_TOOL_NUMBER, { x: 0, y: 0 }, 0, { x: 0, y: 0 }).join('\n')
+    );
+    assert.ok(lines.includes('M61 Q99'), 'probe is loaded');
+    assert.ok(lines.some(l => l.startsWith('G38.2')), 'tlsMode "always" should still probe T99');
+    // The TLS approach must be an explicit route from the dock, not the
+    // routine's own approach computed from the pre-M6 origin.
+    const m61 = lines.indexOf('M61 Q99');
+    const tlsPark = lines.indexOf('G53 G0 X200 Y0');
+    assert.ok(tlsPark > m61, 'spindle should travel from the dock to the toolsetter');
+  });
+
+  test('T99 → T1: the rack entrance is routed from the dock, not the stale origin', () => {
+    const lines = motionLines(
+      buildToolChangeProgram(PROBE_RACK, PROBE_TOOL_NUMBER, 1, { x: 0, y: 0 }, 0, { x: 0, y: 0 }).join('\n')
+    );
+    const deregister = lines.indexOf('M61 Q0');
+    // Everything after M61 Q0 is the load of T1. Its first move must be the
+    // sliding-side entry point — reached from the dock at X=300, which is
+    // on the entry side, so a single diagonal is correct and safe.
+    assert.equal(lines[deregister + 1], 'G53 G0 X-55 Y40',
+      'load should enter the rack via the sliding-side entry point');
+    assert.equal(lines[deregister + 2], 'G53 G0 X-75', 'then the perp descent to the slot approach');
+    assert.ok(lines.includes('M61 Q1'), 'rack tool is loaded');
+  });
+
+  test('T1 → T99: leaving the rack for the dock hugs the near keepout edge', () => {
+    const lines = motionLines(
+      buildToolChangeProgram(PROBE_RACK, 1, PROBE_TOOL_NUMBER, { x: 0, y: 0 }, 0, { x: 0, y: 0 }).join('\n')
+    );
+    const deregister = lines.indexOf('M61 Q0');
+    // The dock is at X=300, far to the +X side. The route out must leave by
+    // the +X edge of the keepout (X=-55), not walk around the -X side.
+    assert.equal(lines[deregister + 1], 'G53 G0 X-55 Y40', 'exit by the edge nearest the dock');
+    assert.equal(lines[deregister + 2], 'G53 G0 X300 Y150', 'then straight to the dock');
+    assert.ok(!lines.includes('G53 G0 X-175 Y40'), 'must not detour around the far side of the rack');
+  });
+
+  test('T99 → T0 restores the fail-safe clamped drawbar', () => {
+    const lines = motionLines(
+      buildToolChangeProgram(PROBE_RACK, PROBE_TOOL_NUMBER, 0, { x: 0, y: 0 }, 0, { x: 0, y: 0 }).join('\n')
+    );
+    const deregister = lines.indexOf('M61 Q0');
+    const clampAfter = lines.indexOf('M65 P2', deregister);
+    assert.ok(clampAfter > deregister,
+      'the drawbar must not be left open once the probe is docked and nothing is loaded');
+  });
+
+  test('addProbe off: T99 keeps falling through to the manual-swap path', () => {
+    const off = { ...PROBE_RACK, addProbe: false };
+    const gcode = buildToolChangeProgram(off, 0, PROBE_TOOL_NUMBER, { x: 0, y: 0 }, 0, { x: 0, y: 0 }).join('\n');
+    assert.ok(gcode.includes('MANUAL_CLAMP_TOOL_99'), 'should still prompt the operator');
+    assert.ok(!gcode.includes('X300 Y150'), 'the dock must not be visited when the probe tool is disabled');
+  });
+
+  test('probe pickup is gated by the air-pressure guard like any other change', () => {
+    const withSensor = { ...PROBE_RACK, pressureInput: 3 };
+    const gcode = buildToolChangeProgram(withSensor, 0, PROBE_TOOL_NUMBER, { x: 0, y: 0 }, 0, { x: 0, y: 0 }).join('\n');
+    assert.ok(gcode.includes('M66 P3 L4'), 'pressure is read before the drawbar is worked');
+    assert.ok(gcode.indexOf('M66 P3 L4') < gcode.indexOf('M64 P2'),
+      'the read must come before the first drawbar release');
+  });
+});
+
+describe('$PROBEDOCK — dock position check', () => {
+  test('parks over the dock with a keepout-safe route and never touches the drawbar', () => {
+    const commands = [{ command: '$PROBEDOCK', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 0, mpos: { x: 0, y: 0 } } }, { ...PROBE_RACK });
+    const lines = motionLines(commands.map(c => c.command).join('\n'));
+    assert.ok(lines.length > 1, '$PROBEDOCK should expand into a program');
+    assert.equal(lines[0], 'G53 G21 G90 G0 Z-5', 'retract to safe Z first');
+    assert.ok(lines.includes('G53 G0 X300 Y150'), 'should park over the dock');
+    assert.ok(!lines.some(l => l === 'M64 P2' || l === 'M65 P2'), 'no drawbar motion during a position check');
+  });
+
+  test('Fork dock parks at the approach point, where the slide would start', () => {
+    const commands = [{ command: '$PROBEDOCK', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 0, mpos: { x: 0, y: 0 } } }, { ...FORK_DOCK });
+    const lines = motionLines(commands.map(c => c.command).join('\n'));
+    assert.ok(lines.includes('G53 G0 X300 Y190'), 'fork dock check parks at the approach point');
+  });
+
+  test('ignored when the probe tool is disabled', () => {
+    const commands = [{ command: '$PROBEDOCK', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 0, mpos: { x: 0, y: 0 } } },
+      { ...PROBE_RACK, addProbe: false });
+    assert.equal(commands.length, 1, 'command should pass through untouched');
+    assert.equal(commands[0].command, '$PROBEDOCK');
+  });
+});
+
+describe('buildInitialConfig — probe defaults', () => {
+  test('a config saved before the probe tool existed is unchanged by the upgrade', () => {
+    const cfg = buildInitialConfig({ slots: 6 });
+    assert.equal(cfg.addProbe, false, 'probe tool must be off by default');
+    assert.deepEqual(cfg.probeDock, { x: 0, y: 0, z: -100 });
+    assert.equal(cfg.probeHolding, 'Cup');
+    assert.equal(cfg.probeSlideAxis, 'X');
+    assert.equal(cfg.probeSlideDirection, 'Negative');
+    assert.equal(cfg.probeLoadGcode, '');
+    assert.equal(cfg.probeUnloadGcode, '');
+  });
+
+  test('bad values fall back rather than producing NaN geometry', () => {
+    const cfg = buildInitialConfig({
+      addProbe: true,
+      probeDock: { x: 'nope', y: null, z: undefined },
+      probeHolding: 'Magnet',
+      probeSlideAxis: 'Z',
+      probeSlideDirection: 'sideways',
+      probeSlideDistance: 'lots',
+    });
+    assert.deepEqual(cfg.probeDock, { x: 0, y: 0, z: -100 });
+    assert.equal(cfg.probeHolding, 'Cup', 'unknown holding style falls back to the safer Cup');
+    assert.equal(cfg.probeSlideAxis, 'X');
+    assert.equal(cfg.probeSlideDirection, 'Negative');
+    assert.equal(cfg.probeSlideDistance, 40);
   });
 });

@@ -24,12 +24,21 @@ Automatic tool changer support for pneumatic ATC systems that use a single aux o
 - Optional automatic TLS after the first `$H` (per-session first-home)
 - Configurable seek distance, seek feedrate, and TLS aux output for the probe signal
 
+### 3D Probe Tool (T99)
+- A dedicated 3D probe that lives in its **own dock** outside the rack and is picked up by the drawbar — `M6 T99` runs the same pneumatic sequence a rack tool gets: air-pressure check, release, descend onto the holder, clamp, seat. No operator prompt at any point
+- **Cup** or **Fork** dock holding, with a slide axis independent of the rack's orientation (probe docks are often mounted at 90° to the magazine)
+- Optional **Load / Unload Probe G-code** for waking a wireless probe or switching its receiver on and off
+- Travel to and from the dock routes around the rack keepout, and starts from where the spindle actually is — including straight after a rack tool has just been put away
+- Follows the normal TLS strategy, so the probe's length is measured or read from the library like any other tool
+- Off by default; with it disabled T99 behaves exactly as before (manual swap)
+
 ### Aux Output Support
 - Clamp / unclamp control via `M7`, `M8`, or a numeric `M64 P<n>` / `M65 P<n>` pin
 - Same options for the TLS probe signal
 
 ### Positioning Commands
 - `$SLOT1` … `$SLOT8` – jog the spindle over a slot's engaged position (at Z-safe)
+- `$PROBEDOCK` – jog the spindle over the 3D probe dock (at Z-safe) without touching the drawbar, using the same route a real `M6 T99` takes
 
 ### Safety
 - Halts and prompts the operator when a load / unload sequence needs manual intervention (out-of-rack tool)
@@ -66,6 +75,18 @@ Open **Plugins → Pneumatic ATC** from the toolbar. The dialog uses a left-side
 ### Manual
 Machine XY where the spindle parks and prompts the operator when the requested tool number is outside the rack.
 
+### Probe Tool
+| Setting | Notes |
+|---------|-------|
+| Enable Probe Tool | Registers T99 with the main app. Off by default — with it off, T99 falls through to the manual-swap path |
+| Dock X/Y/Z + Grab | Where the probe rests. Z is the **engaged** height, the same meaning as the rack's Engagement Z |
+| Dock Holding | `Cup` (lift straight off) or `Fork` (slide in / out to disengage) |
+| Slide Axis / Direction / Distance / Speed | Fork docks only. The axis is independent of the rack's Orientation |
+| Load Probe G-code | Runs once the probe is clamped and registered as T99, before the TLS routine — e.g. wake a wireless probe |
+| Unload Probe G-code | Runs before the spindle sets off for the dock, while the probe is still held — e.g. put the probe to sleep |
+
+Keep the dock clear of the rack's Safety Margin. Travel routes around the keepout either way, but a dock inside it forces long detours.
+
 ### Events
 Three Monaco G-code editors:
 - **Pre Tool Change** – runs before every `M6`
@@ -78,7 +99,9 @@ Three Monaco G-code editors:
 |---------|--------|
 | `M6 Tn` | Full tool change to slot n (or manual position if `n > slots`) |
 | `$TLS` | Standalone tool-length probe at the configured setter position |
+| `M6 T99` | Pick up / put back the 3D probe from its dock (when the probe tool is enabled) |
 | `$SLOT1` … `$SLOT8` | Move the spindle to a slot's XY at Z-safe |
+| `$PROBEDOCK` | Move the spindle to the probe dock's XY at Z-safe, without actuating the drawbar |
 | `$H` | Home; optionally followed by a TLS routine (see toggle above) |
 
 ## Typical Setup
@@ -86,7 +109,8 @@ Three Monaco G-code editors:
 1. **Wire the clamp** to an aux output that you can drive with either `M7/M8` (mist/flood) or a numeric pin (`M64 P<n>`). Confirm the output actuates the collet fixture reliably.
 2. **Set the rack** by jogging the spindle to Slot 1's fully-engaged position and hitting **Grab** — this captures machine XY plus the descent Z. Configure Orientation / Direction / Slot Distance to match your rack (Linear mode) or switch to Custom for irregular racks.
 3. **Set the TLS location** by touching off a known tool on the setter, then Grab. Pick your strategy — probe every time is safest until you trust the library offsets.
-4. **Save**. The plugin registers `M6`, `$TLS`, `$SLOT1..N` handlers and updates ncSender's tool count to match your slot count.
+4. **Set up the 3D probe** (optional) on the **Probe Tool** tab: enable it, jog until the spindle nose is seated on the probe holder, and **Grab current** to capture the dock X/Y/Z. Pick Cup or Fork holding, save, then run `$PROBEDOCK` to confirm the spindle lands exactly over the holder before you let `M6 T99` drive the drawbar.
+5. **Save**. The plugin registers `M6`, `$TLS`, `$SLOT1..N` and `$PROBEDOCK` handlers and updates ncSender's tool count to match your slot count.
 
 ## Installation
 

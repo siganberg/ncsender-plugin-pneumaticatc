@@ -24,6 +24,21 @@ const LAYOUT_MODES = ['linear', 'custom'];
 const TLS_MODES = ['library', 'always'];
 const MAX_SLOTS = 32;
 
+// Dedicated 3D probe tool. Matches the RapidChange ATC plugin's number so a
+// job written for one machine runs on the other, and so ncSender's own
+// "probe" tool slot (tool.probe in /api/settings) lines up.
+//
+// On a pneumatic spindle the probe is NOT a manual tool: it sits in its own
+// dock and is picked up with the drawbar exactly like a rack tool — pressure
+// check, air release, descend onto the holder, clamp, seat. The dock is
+// deliberately separate from the rack: a 3D probe is usually taller and
+// wider than a cutter and lives off to the side of the magazine, outside the
+// rack keepout box. Everything below keeps it out of the rack's slot math
+// while reusing the same drawbar timing and keepout-safe routing.
+const PROBE_TOOL_NUMBER = 99;
+const PROBE_HOLDING = ['Cup', 'Fork'];
+const PROBE_SLIDE_AXES = ['X', 'Y'];
+
 // Pneumatic drawbar compensation for CUP-style racks only. On a cup rack
 // the tool holder rests on the cup lip and the drawbar's actuation would
 // otherwise push the holder up out of / down into the taper. A tiny
@@ -99,6 +114,8 @@ const sanitizeOrientation = (value) => (ORIENTATIONS.includes(value) ? value : '
 const sanitizeDirection = (value) => (DIRECTIONS.includes(value) ? value : 'Negative');
 const sanitizeSlideDirection = (value) => (value === 'Positive' ? 'Positive' : 'Negative');
 const sanitizeLayoutMode = (value) => (LAYOUT_MODES.includes(value) ? value : 'linear');
+const sanitizeProbeHolding = (value) => (PROBE_HOLDING.includes(value) ? value : 'Cup');
+const sanitizeProbeSlideAxis = (value) => (PROBE_SLIDE_AXES.includes(value) ? value : 'X');
 const sanitizeTlsMode = (value, legacyPerformTlsOnChange) => {
   if (value === 'first') return 'library';        // legacy 3-way → 2-way
   if (TLS_MODES.includes(value)) return value;
@@ -190,6 +207,39 @@ const buildInitialConfig = (raw = {}) => {
     slotCoords: raw.slotCoords || [],
     toolsetter: sanitizeCoords2D(raw.toolsetter ?? raw.toolSetter),
     manualTool: sanitizeCoords2D(raw.manualTool),
+
+    // === 3D probe tool (T99) ===
+    // Off by default: with `addProbe` false, T99 is just another tool number
+    // above the rack capacity and keeps falling through to the manual-swap
+    // path, so upgrading the plugin changes nothing for existing installs.
+    addProbe: raw.addProbe ?? false,
+    // Dock XY plus the engaged Z — the machine Z at which the spindle nose
+    // is seated on the probe's holder. Same meaning as slot1.z for the rack.
+    probeDock: {
+      x: toFiniteNumber(raw.probeDock?.x),
+      y: toFiniteNumber(raw.probeDock?.y),
+      z: toFiniteNumber(raw.probeDock?.z, -100)
+    },
+    // How the dock retains the probe. 'Cup' drops straight down (no lateral
+    // move); 'Fork' needs a slide along one axis to engage / disengage, the
+    // same way the rack's fork slots do. Defaults to Cup because that is the
+    // common shop-built probe dock and it is the safer of the two to get
+    // wrong — a Cup sequence run on a fork simply never engages, whereas a
+    // stray lateral G1 could snap a stylus.
+    probeHolding: sanitizeProbeHolding(raw.probeHolding),
+    // Fork-only. The dock is a standalone station, so it gets its own slide
+    // axis rather than inheriting the rack's orientation — a probe dock is
+    // often mounted at 90° to the magazine.
+    probeSlideAxis: sanitizeProbeSlideAxis(raw.probeSlideAxis),
+    probeSlideDirection: sanitizeSlideDirection(raw.probeSlideDirection),
+    probeSlideDistance: toFiniteNumber(raw.probeSlideDistance, 40),
+    probeSlideSpeed: toFiniteNumber(raw.probeSlideSpeed, 500),
+    // Optional user g-code. Load runs once the probe is clamped and M61 has
+    // registered it (wake a wireless probe, switch on its receiver, dwell for
+    // the radio link); Unload runs before the spindle leaves for the dock
+    // (put the probe to sleep, switch the receiver off).
+    probeLoadGcode: raw.probeLoadGcode ?? '',
+    probeUnloadGcode: raw.probeUnloadGcode ?? '',
 
     zSafe: toFiniteNumber(raw.zSafe, 0),
 
@@ -1016,8 +1066,183 @@ function slideFeedrate(settings) {
   return settings.slideSpeed > 0 ? settings.slideSpeed : 500;
 }
 
+// === 3D probe dock =====================================================
+//
+// The dock is a single station outside the rack, so none of the slot math
+// (slotParFor / slotEntryPoint / rackEntrance) applies to it. What it DOES
+// share with the rack is the drawbar timing — the same DRAWBAR_OFFSET_MM
+// back-off / seat pair and the same taper-blow handling — and the same
+// obligation to route around the rack keepout on the way there and back.
+// Routing therefore goes through `routePoint` with `freeEdge: true`: no
+// rack slot is being engaged, so the fork's sliding-side constraint is
+// irrelevant and the edge is picked by geometry (same reasoning as tlsExit).
+
+function probeSlideFeedrate(settings) {
+  return settings.probeSlideSpeed > 0 ? settings.probeSlideSpeed : slideFeedrate(settings);
+}
+
+function isProbeTool(settings, toolNumber) {
+  return !!settings.addProbe && toolNumber === PROBE_TOOL_NUMBER;
+}
+
+// Engaged XY (spindle centred on the probe holder) and, for a Fork dock,
+// the approach XY the slide runs from. Cup docks have no lateral move, so
+// approach === engaged.
+function probeDockCoords(settings) {
+  const dock = settings.probeDock || {};
+  return {
+    x: toFiniteNumber(dock.x),
+    y: toFiniteNumber(dock.y),
+    z: toFiniteNumber(dock.z, -100)
+  };
+}
+
+function probeDockPosition(settings) {
+  const dock = probeDockCoords(settings);
+  const engaged = { x: dock.x, y: dock.y };
+  if (settings.probeHolding !== 'Fork') return { engaged, approach: engaged };
+  const slideSign = settings.probeSlideDirection === 'Positive' ? 1 : -1;
+  // Approach sits opposite the slide direction — same convention as
+  // calculateSlotPosition, so "Slide Direction" reads the same on both tabs.
+  const offset = -slideSign * (settings.probeSlideDistance || 0);
+  const approach = settings.probeSlideAxis === 'Y'
+    ? { x: engaged.x, y: engaged.y + offset }
+    : { x: engaged.x + offset, y: engaged.y };
+  return { engaged, approach };
+}
+
+// Where the spindle is parked once a probe load or unload has finished:
+// a Fork dock slides out to the approach point before lifting, a Cup dock
+// lifts straight off the engaged point. Used to seed the exit routing.
+function probeDockRestPoint(settings) {
+  const dock = probeDockPosition(settings);
+  return settings.probeHolding === 'Fork' ? dock.approach : dock.engaged;
+}
+
+// Edge selection for a dock route. `routePoint` defaults its anchor to
+// `from`, which is right when the destination is the rack (rackEntrance) but
+// wrong here: with the spindle still inside the rack's perp band — a rack
+// tool was just put away and the dock is the next stop — anchoring on `from`
+// picks the edge by the rack's own slide direction and can walk the spindle
+// out the far side, along the full width of the keepout, and back down the
+// other side. Anchor on whichever endpoint is clear of the band instead, so
+// the route hugs the side the dock actually sits on. Both clear → anchor on
+// the destination, the same choice tlsExit makes.
+function probeRoute(from, to, settings, anchor) {
+  if (anchor === undefined) {
+    const orientationY = settings.orientation === 'Y';
+    const pad = settings.keepoutPadding ?? settings.slideDistance ?? 0;
+    const slot1Perp = orientationY ? settings.slot1.x : settings.slot1.y;
+    const perpOf = (p) => (orientationY ? p.x : p.y);
+    const insideBand = (p) => perpOf(p) > slot1Perp - pad && perpOf(p) < slot1Perp + pad;
+    anchor = (insideBand(to) && !insideBand(from)) ? from : to;
+  }
+  return waypointsToGCode(
+    routePoint(from, to, settings, { edgeAnchor: anchor, freeEdge: true })
+  );
+}
+
+// Put the 3D probe back in its dock. Mirrors buildUnloadTool's rack path:
+// descend, (fork) slide in, dwell, release, drawbar back-off, lift.
+function buildProbeUnload(settings, origin = { x: 0, y: 0 }) {
+  const dock = probeDockPosition(settings);
+  const dockZ = probeDockCoords(settings).z;
+  const isFork = settings.probeHolding === 'Fork';
+  const userGcode = indentBlock(settings.probeUnloadGcode);
+
+  // Fork: travel to the approach point and slide in at depth. Cup: travel
+  // straight over the engaged point and lower into it.
+  const travelTarget = isFork ? dock.approach : dock.engaged;
+  const travel = probeRoute(origin, travelTarget, settings);
+  const slideIn = isFork
+    ? `G53 G1 X${dock.engaged.x} Y${dock.engaged.y} F${probeSlideFeedrate(settings)}`
+    : '';
+
+  const drawbarBackoff = `
+      G53 G1 Z${dockZ + DRAWBAR_OFFSET_MM} F${DRAWBAR_FEEDRATE_MMPM}`;
+
+  // Taper blow: lift clear of the holder, then close the drawbar right here
+  // so the air isn't venting across the whole traverse back to the job.
+  const closeAfterLiftOff = settings.taperBlow ? `
+      G53 G0 Z${dockZ + DEDUST_LIFT_MM}
+      ${auxLineFor(settings, 'clamp')}
+      G4 P0.5` : '';
+
+  return `
+    (Unload probe tool T${PROBE_TOOL_NUMBER} into its dock)
+    ${userGcode}
+    ${travel}
+    G53 G0 Z${dockZ}
+    ${slideIn}
+    G4 P0.5
+    ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
+    G4 P0.5${closeAfterLiftOff}
+    G53 G0 Z${settings.zSafe}
+    M61 Q0
+  `.trim();
+}
+
+// Pick the 3D probe up out of its dock. Mirrors buildLoadTool's rack path:
+// travel over the holder, release, descend to the drawbar approach height,
+// clamp, seat, (fork) slide out, lift, register the tool, then the caller's
+// TLS routine.
+function buildProbeLoad(settings, tlsRoutine, drawbarAlreadyReleased = false, origin = { x: 0, y: 0 }) {
+  const dock = probeDockPosition(settings);
+  const dockZ = probeDockCoords(settings).z;
+  const isFork = settings.probeHolding === 'Fork';
+  const approachZ = dockZ + DRAWBAR_OFFSET_MM;
+
+  // Loading always descends onto the holder from directly above — a fork
+  // grips the holder's groove, so the spindle comes straight down onto it
+  // and only slides out sideways once the drawbar has hold of the tang.
+  const travel = probeRoute(origin, dock.engaged, settings);
+
+  // Coming from an empty spindle the drawbar sits in its fail-safe clamped
+  // state and has to be opened before we touch the shank. After an unload
+  // it is already open (unless taper blow re-clamped it).
+  const releaseFirst = drawbarAlreadyReleased ? '' : `
+      G4 P0.5
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P0.5`;
+
+  const descend = settings.taperBlow ? `
+      G53 G0 Z${dockZ + DEDUST_LIFT_MM}
+      G4 P0.1
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P${DEDUST_VENT_SEC}
+      G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
+      G53 G0 Z${approachZ}`;
+  const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
+
+  const drawbarSeat = `
+      G53 G1 Z${dockZ} F${DRAWBAR_FEEDRATE_MMPM}`;
+  const slideOut = isFork
+    ? `G53 G1 X${dock.approach.x} Y${dock.approach.y} F${probeSlideFeedrate(settings)}`
+    : '';
+
+  return `
+    (Load probe tool T${PROBE_TOOL_NUMBER} from its dock)
+    ${travel}${descend}
+    G4 P0.5
+    ${auxLineFor(settings, 'clamp')}${drawbarSeat}
+    G4 P${clampSettle}
+    ${slideOut}
+    G53 G0 Z${settings.zSafe}
+    M61 Q${PROBE_TOOL_NUMBER}
+    ${indentBlock(settings.probeLoadGcode)}
+    ${tlsRoutine}
+  `.trim();
+}
+
 function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }) {
   if (currentTool === 0) return '';
+
+  // T99 with the probe tool enabled goes to its own dock, not the manual
+  // station — checked before the `> slots` manual test, since 99 is always
+  // above the rack capacity.
+  if (isProbeTool(settings, currentTool)) {
+    return buildProbeUnload(settings, origin);
+  }
 
   if (currentTool > settings.slots) {
     // Manual unload: park at manual position → dialog with [Release]
@@ -1076,6 +1301,13 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
 
 function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlreadyReleased = false, origin = { x: 0, y: 0 }, chainedFromRack = false) {
   if (toolNumber === 0) return '';
+
+  // T99 with the probe tool enabled comes out of its own dock. Same
+  // precedence note as buildUnloadTool: this must be tested before the
+  // `> slots` manual branch.
+  if (isProbeTool(settings, toolNumber)) {
+    return buildProbeLoad(settings, tlsRoutine, drawbarAlreadyReleased, origin);
+  }
 
   if (toolNumber > settings.slots) {
     // Manual load — dialog always shows the single-Clamp step
@@ -1233,23 +1465,36 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // is derived purely from slot geometry, not from how the tool is held.
   const isRackSlot = toolNumber > 0
     && toolNumber <= settings.slots;
+  // The 3D probe dock is its own station: it isn't a rack slot, but like a
+  // rack slot the spindle IS parked away from `origin` when the TLS routine
+  // starts, so it needs the same skip-the-XY-approach + explicit routing
+  // treatment. It just routes from the dock rather than out of the rack.
+  const isProbeLoad = isProbeTool(settings, toolNumber);
+  const isProbeUnload = isProbeTool(settings, currentTool);
+  const probeRest = probeDockRestPoint(settings);
   // When the routine is chained after rackExitToTLS/cupExit, we're
   // already parked at (tlsX, tlsY) from the routing above. Tell the
   // routine to skip its own XY approach so we don't emit the redundant
   // edge-hop-back-to-TLS pair.
   const chainedFromRackExit = shouldProbe && isRackSlot;
+  const chainedFromProbeDock = shouldProbe && isProbeLoad;
   const rawTlsRoutine = shouldProbe
-    ? createToolLengthSetRoutine(settings, toolOffsets, { skipXYApproach: chainedFromRackExit, originMPos: origin }).join('\n')
+    ? createToolLengthSetRoutine(settings, toolOffsets, {
+        skipXYApproach: chainedFromRackExit || chainedFromProbeDock,
+        originMPos: origin
+      }).join('\n')
     : (settings.tlsMode === 'library' && hasStoredTlo
         ? `(Load stored TLO from tool library)\n    G43.1 Z${storedTlo}`
         : '');
   const tlsX = settings.toolsetter.x + (toolOffsets.x || 0);
   const tlsY = settings.toolsetter.y + (toolOffsets.y || 0);
-  const tlsRoutine = chainedFromRackExit
-    ? `${settings.rackHolding === 'Cup'
-        ? cupExit(targetSlot.engaged, { x: tlsX, y: tlsY }, settings)
-        : rackExitToTLS(targetSlot.engaged, tlsX, tlsY, settings)}\n${rawTlsRoutine}`
-    : rawTlsRoutine;
+  const tlsRoutine = chainedFromProbeDock
+    ? `${probeRoute(probeRest, { x: tlsX, y: tlsY }, settings, { x: tlsX, y: tlsY })}\n${rawTlsRoutine}`
+    : chainedFromRackExit
+      ? `${settings.rackHolding === 'Cup'
+          ? cupExit(targetSlot.engaged, { x: tlsX, y: tlsY }, settings)
+          : rackExitToTLS(targetSlot.engaged, tlsX, tlsY, settings)}\n${rawTlsRoutine}`
+      : rawTlsRoutine;
 
   // Every time we probe (both modes), arm the writeback so the next
   // [TLO:xxx] response from the controller gets saved into the tool's
@@ -1266,14 +1511,33 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // so collapse them into a single dialog+move via buildManualSwap.
   // Otherwise: any unload path — rack or manual — leaves the drawbar
   // released, and a manual load that follows uses the CLAMP dialog.
-  const isManualToManual = currentTool > settings.slots && toolNumber > settings.slots;
-  // A rack unload with the taper blow on re-clamps after lifting off, so
-  // the drawbar is NOT left open for the load that follows.
-  const rackUnloadReclamped = settings.taperBlow && currentTool > 0 && currentTool <= settings.slots;
+  // T99 is above the rack capacity but is NOT a manual tool when the probe
+  // dock is enabled — it has a station of its own, so it never takes part in
+  // the collapsed manual-swap dialog.
+  const isManualTool = (n) => n > settings.slots && !isProbeTool(settings, n);
+  const isManualToManual = isManualTool(currentTool) && isManualTool(toolNumber);
+  // A rack or probe-dock unload with the taper blow on re-clamps after
+  // lifting off, so the drawbar is NOT left open for the load that follows.
+  const rackUnloadReclamped = settings.taperBlow && currentTool > 0
+    && (currentTool <= settings.slots || isProbeUnload);
   const drawbarAlreadyReleased = currentTool > 0 && !rackUnloadReclamped;
   const unloadSection = isManualToManual
     ? ''
     : buildUnloadTool(settings, currentTool, sourceSlot, origin);
+
+  // Where the spindle actually is when the load section begins. For rack
+  // loads the `chainedFromRack` flag already covers this, but the probe dock
+  // is off on its own and needs a real starting point: routing from the
+  // pre-M6 `origin` would compute a path from somewhere the spindle no
+  // longer is, and with the rack sitting between the two that path can cut
+  // straight through the keepout.
+  const loadOrigin = isProbeUnload
+    ? probeRest
+    : (isProbeLoad && currentTool > 0 && currentTool <= settings.slots)
+      ? sourceSlot.engaged          // rack tool was just put away
+      : (isProbeLoad && isManualTool(currentTool))
+        ? { x: settings.manualTool.x, y: settings.manualTool.y }
+        : origin;
 
   // Chained rack swap: an unload just placed the machine at the source
   // slot's engaged position at Z-safe. Slot N's engaged sits in the
@@ -1288,7 +1552,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
 
   const loadSection = isManualToManual
     ? buildManualSwap(settings, toolNumber, tlsRoutine)
-    : buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, origin, chainedFromRack);
+    : buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadOrigin, chainedFromRack);
 
   // Tx → T0 leaves the drawbar released after the unload (there is no
   // load section to re-clamp). Restore the fail-safe clamped state so
@@ -1308,8 +1572,15 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   //   * Otherwise (manual / T0→T0) → leave as-is; existing sequence handles it.
   let exitSection = '';
   const isCup = settings.rackHolding === 'Cup';
-  if (isRackSlot && shouldProbe) {
+  if ((isRackSlot || isProbeLoad) && shouldProbe) {
     exitSection = options.endAtTls ? '' : tlsExit(tlsX, tlsY, returnTo, settings);
+  } else if (isProbeLoad) {
+    // Probe loaded but not probed (library TLO in hand) — spindle is parked
+    // at the dock, so route home the same keepout-safe way we came.
+    exitSection = probeRoute(probeRest, returnTo, settings, returnTo);
+  } else if (toolNumber === 0 && isProbeUnload) {
+    // Probe put away and nothing loaded — same trip home from the dock.
+    exitSection = probeRoute(probeRest, returnTo, settings, returnTo);
   } else if (toolNumber === 0 && currentTool > 0 && currentTool <= settings.slots) {
     exitSection = isCup
       ? cupExit(sourceSlot.engaged, returnTo, settings)
@@ -1539,6 +1810,36 @@ function handleSlotCommand(commands, context, settings) {
   expandIntoCommands(commands, idx, commands[idx].command, program, settings);
 }
 
+// `$PROBEDOCK` — park the spindle over the probe dock without touching the
+// drawbar. This is the setup affordance: jog roughly into place, run it to
+// confirm the saved coordinates put the spindle exactly over the holder.
+// Routed through the same keepout-safe path a real probe load uses, so what
+// you verify here is the path the tool change will actually take. Ignored
+// when the probe tool is disabled — the command falls through to the
+// controller, which reports it as unknown.
+function buildProbeDockNav(settings, origin = { x: 0, y: 0 }) {
+  const dock = probeDockPosition(settings);
+  const target = settings.probeHolding === 'Fork' ? dock.approach : dock.engaged;
+  return `
+    G53 G21 G90 G0 Z${settings.zSafe}
+    ${probeRoute(origin, target, settings)}
+  `.trim();
+}
+
+function handleProbeDockCommand(commands, context, settings) {
+  const idx = commands.findIndex((c) =>
+    c.isOriginal && /^\$PROBEDOCK$/i.test(c.command.trim()));
+  if (idx === -1) return;
+  if (!settings.addProbe) return;
+
+  const origin = {
+    x: context?.machineState?.mpos?.x ?? 0,
+    y: context?.machineState?.mpos?.y ?? 0,
+  };
+  const program = formatGCode(buildProbeDockNav(settings, origin));
+  expandIntoCommands(commands, idx, commands[idx].command, program, settings);
+}
+
 function handleM6Command(commands, context, settings) {
   const idx = commands.findIndex((c) => {
     if (!c.isOriginal) return false;
@@ -1624,6 +1925,7 @@ function onBeforeCommand(commands, context, settings) {
   handleTLSCommand(commands, context, settings);
   handleMeasureTloCommand(commands, context, settings);
   handleSlotCommand(commands, context, settings);
+  handleProbeDockCommand(commands, context, settings);
   handleM6Command(commands, context, settings);
   return commands;
 }
@@ -1635,6 +1937,8 @@ export {
   buildLoadTool, buildUnloadTool, buildSlotNav, calculateSlotPosition,
   buildToolChangeProgram, parseMeasureTloCommand,
   gateSpindleUnclamp,
+  buildProbeLoad, buildProbeUnload, buildProbeDockNav,
+  probeDockPosition, probeDockRestPoint, PROBE_TOOL_NUMBER,
   createToolLengthSetRoutine, createToolLengthSetProgram,
   routePoint, pickEntryEdge,
 };

@@ -899,6 +899,20 @@
   .pa-events-card .pa-card-title { margin-bottom: 2px; }
   .pa-events-card .pa-card-help { margin-bottom: 6px; }
 
+  /* Probe Tool panel — everything below the enable toggle dims out and
+     stops accepting input while the probe tool is disabled. Kept visible
+     rather than hidden so the operator can read what enabling would give
+     them before flipping the switch. */
+  #pa-probe-fields {
+    /* The wrapper is a flex item of .pa-panel, so it has to re-create the
+       panel's own column + gap or the cards inside it butt together. */
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap-lg);
+    transition: opacity 0.15s ease;
+  }
+  #pa-probe-fields.disabled { opacity: 0.5; pointer-events: none; }
+
   /* Events tab: single column always. The base .pa-panel already
      stacks children vertically with overflow-y: auto, so cards flow
      top-to-bottom and the panel scrolls if they don't fit. */
@@ -1144,6 +1158,17 @@
             </svg>
           </span>
           <span class="pa-nav-label">Manual</span>
+          <span class="pa-tab-caret" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="pa-nav-btn" data-nav="probe">
+          <span class="pa-nav-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="8"/>
+              <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+              <circle cx="12" cy="12" r="2"/>
+            </svg>
+          </span>
+          <span class="pa-nav-label">Probe Tool</span>
           <span class="pa-tab-caret" aria-hidden="true"></span>
         </button>
         <button type="button" class="pa-nav-btn" data-nav="events">
@@ -1540,6 +1565,139 @@
       </footer>
     </section>
 
+    <!-- ===================== PROBE TOOL (T99) ===================== -->
+    <!-- The 3D probe is picked up with the drawbar like any rack tool, but
+         from its own dock outside the magazine. Everything on this tab is
+         inert until "Enable Probe Tool" is on — with it off, T99 keeps
+         falling through to the manual-swap path exactly as before. -->
+    <section class="pa-content" data-view="probe">
+      <header class="pa-panel-header">
+        <h2 class="pa-panel-title">Probe Tool</h2>
+        <div class="pa-header-cards">
+          <div class="pa-header-card">
+            <div class="pa-mcoord">
+              <div class="pa-mcoord-title">Machine Coordinates</div>
+              <div class="pa-mcoord-row">
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">X</span><span class="pa-mcoord-value pa-axis-x">0.000</span></div>
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">Y</span><span class="pa-mcoord-value pa-axis-y">0.000</span></div>
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">Z</span><span class="pa-mcoord-value pa-axis-z">0.000</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="pa-header-card">
+            <div class="pa-jog-controls">
+              <nc-step-control></nc-step-control>
+              <nc-jog-control></nc-jog-control>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="pa-panel">
+        <div class="pa-card">
+          <h3 class="pa-card-title">3D Probe (T99)</h3>
+          <p class="pa-card-help">Adds a dedicated 3D probe tool to the main app. <code>M6 T99</code> then picks the probe out of its own dock using the drawbar — air pressure check, release, descend, clamp — the same sequence a rack tool gets, and puts it back the same way.</p>
+          <div class="pa-field-inline">
+            <label for="pa-add-probe" title="Enable probe tool (T99) in the main app">Enable Probe Tool</label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-add-probe">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div id="pa-probe-fields">
+          <div class="pa-card">
+            <h3 class="pa-card-title">Dock Position</h3>
+            <p class="pa-card-help">Where the probe rests when it isn't in the spindle. Jog until the spindle nose is seated on the probe holder, then Grab current. <strong>Z is the engaged height</strong> — the same meaning as the rack's Engagement Z. Keep the dock clear of the rack's safety margin; travel to and from it routes around the rack either way.</p>
+            <div>
+              <label class="pa-group-label">Coordinates</label>
+              <div class="pa-coord-row">
+                <div class="pa-coord">
+                  <span class="pa-coord-label">X</span>
+                  <input class="pa-input" type="number" id="pa-probedock-x" value="0" step="0.001">
+                </div>
+                <div class="pa-coord">
+                  <span class="pa-coord-label">Y</span>
+                  <input class="pa-input" type="number" id="pa-probedock-y" value="0" step="0.001">
+                </div>
+                <div class="pa-coord">
+                  <span class="pa-coord-label">Z</span>
+                  <input class="pa-input" type="number" id="pa-probedock-z" value="-100" step="0.001">
+                </div>
+                <button type="button" class="pa-btn pa-btn-sm" id="pa-probedock-grab">Grab current</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="pa-card">
+            <h3 class="pa-card-title">Dock Holding</h3>
+            <p class="pa-card-help">How the dock retains the probe. <strong>Cup</strong> catches the holder from below, so the spindle lifts straight off it. <strong>Fork</strong> grips the holder's groove and needs a lateral slide to disengage — the probe is set down and slid in, and slid out again once the drawbar has hold of it.</p>
+            <div class="pa-row-3">
+              <div class="pa-field">
+                <label for="pa-probe-holding">Holding</label>
+                <select class="pa-select" id="pa-probe-holding">
+                  <option value="Cup" selected>Cup</option>
+                  <option value="Fork">Fork</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Fork-only motion params. The dock gets its own slide axis
+                 rather than inheriting the rack's orientation — a probe dock
+                 is often mounted at 90° to the magazine. -->
+            <div id="pa-probe-fork-settings">
+              <div class="pa-field-inline">
+                <label>Slide Axis</label>
+                <div class="pa-segment" id="pa-probe-slide-axis">
+                  <button type="button" class="pa-segment-btn active" data-value="X">X</button>
+                  <button type="button" class="pa-segment-btn" data-value="Y">Y</button>
+                  <div class="pa-segment-indicator"></div>
+                </div>
+              </div>
+              <div class="pa-field-inline">
+                <label>Slide Direction</label>
+                <div class="pa-segment" id="pa-probe-slide-direction">
+                  <button type="button" class="pa-segment-btn active" data-value="Negative">−</button>
+                  <button type="button" class="pa-segment-btn" data-value="Positive">+</button>
+                  <div class="pa-segment-indicator"></div>
+                </div>
+              </div>
+              <div class="pa-field-inline">
+                <label id="pa-label-probe-slide-distance">Slide Distance (mm)</label>
+                <input class="pa-input" type="number" id="pa-probe-slide-distance" value="40" min="0" step="0.1">
+              </div>
+              <div class="pa-field-inline">
+                <label id="pa-label-probe-slide-speed">Slide Speed (mm/min)</label>
+                <input class="pa-input" type="number" id="pa-probe-slide-speed" value="500" min="1" step="1">
+              </div>
+            </div>
+          </div>
+
+          <div class="pa-card pa-events-card">
+            <h3 class="pa-card-title">Load Probe G-code</h3>
+            <p class="pa-card-help">Runs once the probe is clamped and registered as T99, before the tool-length routine. Use it to wake a wireless probe, switch on its receiver (e.g. <code>M64 P5</code>), or dwell for the radio link. Leave empty if the probe needs nothing.</p>
+            <div id="pa-probe-load-editor" class="pa-monaco"></div>
+          </div>
+
+          <div class="pa-card pa-events-card">
+            <h3 class="pa-card-title">Unload Probe G-code</h3>
+            <p class="pa-card-help">Runs before the spindle sets off for the dock, while the probe is still in the spindle. Use it to put the probe to sleep or switch the receiver off (e.g. <code>M65 P5</code>).</p>
+            <div id="pa-probe-unload-editor" class="pa-monaco"></div>
+          </div>
+
+          <div class="pa-card">
+            <h3 class="pa-card-title">Check the dock position</h3>
+            <p class="pa-card-help">Run <code>$PROBEDOCK</code> from the console to send the spindle to the saved dock position without touching the drawbar. It takes the same keepout-safe path a real <code>M6 T99</code> takes, so what you see is the path the tool change will use. Save first — the command reads the stored settings, not the fields above.</p>
+          </div>
+        </div>
+      </div>
+
+      <footer class="pa-panel-footer">
+        <button type="button" class="pa-save-btn" data-save>Save</button>
+      </footer>
+    </section>
+
     <!-- ===================== EVENTS ===================== -->
     <section class="pa-content" data-view="events">
       <header class="pa-panel-header">
@@ -1808,7 +1966,9 @@
     'pa-slide-distance', 'pa-slide-speed', 'pa-keepout-padding', 'pa-slot-distance',
     'pa-seek-start-z', 'pa-seek-distance', 'pa-seek-feedrate',
     'pa-slot1-x', 'pa-slot1-y', 'pa-slot1-z', 'pa-slot1-z-custom',
-    'pa-toolsetter-x', 'pa-toolsetter-y', 'pa-manualtool-x', 'pa-manualtool-y'
+    'pa-toolsetter-x', 'pa-toolsetter-y', 'pa-manualtool-x', 'pa-manualtool-y',
+    'pa-probedock-x', 'pa-probedock-y', 'pa-probedock-z',
+    'pa-probe-slide-distance', 'pa-probe-slide-speed'
   ];
   function relaxUnitInput(el) {
     if (!el || UNITS_PREFERENCE !== 'imperial') return;
@@ -1830,7 +1990,7 @@
       qsa('.pa-content').forEach(function(c) {
         c.classList.toggle('active', c.getAttribute('data-view') === target);
       });
-      if (target === 'events') setTimeout(layoutMonaco, 0);
+      if (target === 'events' || target === 'probe') setTimeout(layoutMonaco, 0);
     });
   });
 
@@ -2392,6 +2552,32 @@
   var segOrientation = initSegment('pa-orientation');
   var segDirection = initSegment('pa-direction');
   var segSlideDir = initSegment('pa-slide-direction');
+  var segProbeSlideAxis = initSegment('pa-probe-slide-axis');
+  var segProbeSlideDir = initSegment('pa-probe-slide-direction');
+
+  // Probe Tool panel state. Two independent toggles:
+  //   * the enable switch dims the whole block below it;
+  //   * Dock Holding = Cup hides the slide fields (a cup has no lateral
+  //     move), mirroring how Rack Holding works on the ATC Setup tab.
+  function updateProbeEnabledState() {
+    var toggle = $('pa-add-probe');
+    var fields = $('pa-probe-fields');
+    if (!toggle || !fields) return;
+    fields.classList.toggle('disabled', !toggle.checked);
+    var readOnly = !toggle.checked;
+    if (probeLoadEditor) probeLoadEditor.updateOptions({ readOnly: readOnly });
+    if (probeUnloadEditor) probeUnloadEditor.updateOptions({ readOnly: readOnly });
+  }
+  function updateProbeHoldingVisibility() {
+    var forkBlock = $('pa-probe-fork-settings');
+    var holding = $('pa-probe-holding');
+    if (!forkBlock || !holding) return;
+    forkBlock.style.display = holding.value === 'Cup' ? 'none' : '';
+  }
+  var probeToggle = $('pa-add-probe');
+  if (probeToggle) probeToggle.addEventListener('change', updateProbeEnabledState);
+  var probeHoldingSelect = $('pa-probe-holding');
+  if (probeHoldingSelect) probeHoldingSelect.addEventListener('change', updateProbeHoldingVisibility);
 
   // Rack Holding visibility — Cup drops top-down so the slide fields are
   // irrelevant. Toggle the fork-only block based on the dropdown value.
@@ -2538,6 +2724,7 @@
   bindGrab('pa-slot1-grab', 'slot1');
   bindGrab('pa-toolsetter-grab', 'toolsetter');
   bindGrab('pa-manualtool-grab', 'manualtool');
+  bindGrab('pa-probedock-grab', 'probedock');
 
   // ---------- Machine coord subscription ----------
   function extractCoords(payload) {
@@ -2642,6 +2829,8 @@
   var preTlsEditor = null;
   var postTlsEditor = null;
   var abortEditor = null;
+  var probeLoadEditor = null;
+  var probeUnloadEditor = null;
   function isLight() { return document.body.classList.contains('theme-light'); }
   function initMonaco() {
     if (!window.monaco) return;
@@ -2666,6 +2855,8 @@
     if ($('pa-post-editor'))     postEditor    = monaco.editor.create($('pa-post-editor'),     Object.assign({}, opts, { value: initialConfig.postToolChangeGcode || '' }));
     if ($('pa-pre-tls-editor'))  preTlsEditor  = monaco.editor.create($('pa-pre-tls-editor'),  Object.assign({}, opts, { value: initialConfig.preTlsGcode         || '' }));
     if ($('pa-post-tls-editor')) postTlsEditor = monaco.editor.create($('pa-post-tls-editor'), Object.assign({}, opts, { value: initialConfig.postTlsGcode        || '' }));
+    if ($('pa-probe-load-editor'))   probeLoadEditor   = monaco.editor.create($('pa-probe-load-editor'),   Object.assign({}, opts, { value: initialConfig.probeLoadGcode   || '' }));
+    if ($('pa-probe-unload-editor')) probeUnloadEditor = monaco.editor.create($('pa-probe-unload-editor'), Object.assign({}, opts, { value: initialConfig.probeUnloadGcode || '' }));
     // Editor shows only the user's addition. Prefer the explicit
     // `abortEventGcodeUser` field; fall back to stripping the
     // leading auto-injected clamp line from `abortEventGcode` for
@@ -2678,16 +2869,20 @@
       abortEditor = monaco.editor.create($('pa-abort-editor'), Object.assign({}, opts, { value: abortInitial || '' }));
     }
     // Mark dirty on any editor content change — feeds the close confirm.
-    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor].forEach(function(e) {
+    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor,
+     probeLoadEditor, probeUnloadEditor].forEach(function(e) {
       if (e && typeof markDirty === 'function') e.onDidChangeModelContent(markDirty);
     });
+    // Editors exist now, so the enable toggle can set their read-only state.
+    updateProbeEnabledState();
 
     new MutationObserver(function() {
       monaco.editor.setTheme(isLight() ? 'ncsender-light' : 'ncsender-dark');
     }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
   }
   function layoutMonaco() {
-    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor].forEach(function(e) { if (e) e.layout(); });
+    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor,
+     probeLoadEditor, probeUnloadEditor].forEach(function(e) { if (e) e.layout(); });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMonaco);
   else setTimeout(initMonaco, 50);
@@ -2744,6 +2939,22 @@
     $('pa-manualtool-x').value = fmtCoord(manual.x ?? 0);
     $('pa-manualtool-y').value = fmtCoord(manual.y ?? 0);
 
+    // 3D probe tool (T99). Off by default so an upgrade is a no-op.
+    var probeToggleEl = $('pa-add-probe');
+    if (probeToggleEl) probeToggleEl.checked = !!initialConfig.addProbe;
+    var dock = initialConfig.probeDock || { x: 0, y: 0, z: -100 };
+    $('pa-probedock-x').value = fmtCoord(dock.x ?? 0);
+    $('pa-probedock-y').value = fmtCoord(dock.y ?? 0);
+    $('pa-probedock-z').value = fmtCoord(dock.z ?? -100);
+    var probeHoldingEl = $('pa-probe-holding');
+    if (probeHoldingEl) probeHoldingEl.value = initialConfig.probeHolding === 'Fork' ? 'Fork' : 'Cup';
+    if (segProbeSlideAxis) segProbeSlideAxis.set(initialConfig.probeSlideAxis === 'Y' ? 'Y' : 'X');
+    if (segProbeSlideDir)  segProbeSlideDir.set(initialConfig.probeSlideDirection === 'Positive' ? 'Positive' : 'Negative');
+    $('pa-probe-slide-distance').value = fmtCoord(initialConfig.probeSlideDistance ?? 40);
+    $('pa-probe-slide-speed').value    = fmtCoord(initialConfig.probeSlideSpeed ?? 500);
+    updateProbeHoldingVisibility();
+    updateProbeEnabledState();
+
     var db = initialConfig.dialogBehavior || {};
     $('pa-dialog-countdown-sec').value = String(typeof db.countdownSec === 'number' ? db.countdownSec : 5);
     $('pa-dialog-chain-steps').checked = !!db.chainSteps;
@@ -2777,6 +2988,8 @@
     $('pa-label-seek-start-z').textContent = 'Seek Start Z (' + u + ')';
     $('pa-label-seek-distance').textContent = 'Seek Distance (' + u + ')';
     $('pa-label-seek-feedrate').textContent = 'Seek Feedrate (' + f + ')';
+    $('pa-label-probe-slide-distance').textContent = 'Slide Distance (' + u + ')';
+    $('pa-label-probe-slide-speed').textContent = 'Slide Speed (' + f + ')';
     // Sidebar badge — same affordance as the RapidChange ATC plugin, so the
     // operator can tell at a glance which units every field on the page is in.
     var badge = $('pa-units-badge');
@@ -2862,6 +3075,21 @@
         y: toMetric(parseFloatOr($('pa-manualtool-y').value, 0))
       },
 
+      // 3D probe tool (T99) — its own dock, picked up with the drawbar.
+      addProbe: $('pa-add-probe').checked,
+      probeDock: {
+        x: toMetric(parseFloatOr($('pa-probedock-x').value, 0)),
+        y: toMetric(parseFloatOr($('pa-probedock-y').value, 0)),
+        z: toMetric(parseFloatOr($('pa-probedock-z').value, -100))
+      },
+      probeHolding: $('pa-probe-holding').value || 'Cup',
+      probeSlideAxis: segProbeSlideAxis ? segProbeSlideAxis.get() : 'X',
+      probeSlideDirection: segProbeSlideDir ? segProbeSlideDir.get() : 'Negative',
+      probeSlideDistance: toMetric(parseFloatOr($('pa-probe-slide-distance').value, 40)),
+      probeSlideSpeed: toMetric(parseFloatOr($('pa-probe-slide-speed').value, 500)),
+      probeLoadGcode: probeLoadEditor ? probeLoadEditor.getValue() : (initialConfig.probeLoadGcode || ''),
+      probeUnloadGcode: probeUnloadEditor ? probeUnloadEditor.getValue() : (initialConfig.probeUnloadGcode || ''),
+
       dialogBehavior: {
         countdownSec: Math.max(1, parseInt($('pa-dialog-countdown-sec').value, 10) || 5),
         chainSteps: $('pa-dialog-chain-steps').checked
@@ -2934,7 +3162,8 @@
       el.matches('[data-slot-grab]') ||
       el.id === 'pa-slot1-grab' ||
       el.id === 'pa-toolsetter-grab' ||
-      el.id === 'pa-manualtool-grab'
+      el.id === 'pa-manualtool-grab' ||
+      el.id === 'pa-probedock-grab'
     )) markDirty();
   });
 
@@ -3036,7 +3265,7 @@
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tool: { count: payload.slots, source: 'com.ncsender.pneumaticatc', manual: true, tls: true, probe: false }
+          tool: { count: payload.slots, source: 'com.ncsender.pneumaticatc', manual: true, tls: true, probe: !!payload.addProbe }
         })
       });
     } catch (err) {
