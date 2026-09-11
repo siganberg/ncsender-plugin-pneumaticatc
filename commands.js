@@ -140,9 +140,32 @@ const sanitizeProbe = (raw = {}, slots = 1, rack = {}) => {
     x: toFiniteNumber(raw.x),
     y: toFiniteNumber(raw.y),
     z: toFiniteNumber(raw.z, -100),
-    // Runs after the pickup, before the probe's own TLS: a G38.x that proves
-    // the tip triggers. Empty = skip the check.
-    verifyGcode: raw.verifyGcode ?? ''
+    verify: sanitizeProbeVerify(raw.verify, raw.verifyGcode, toFiniteNumber(raw.z, -100))
+  };
+};
+
+// Verification that the probe actually works, run after the pickup and
+// before its TLS. Two ways to describe it:
+//   simple   — one number, the machine Z at which the needle tip is level
+//              with the holder's mount. The routine is generated from it
+//              (see probeVerifyRoutine).
+//   advanced — the operator's own G-code, seeded from the simple routine
+//              when they switch over.
+// `legacyGcode` is the pre-split `verifyGcode` string: non-empty meant a
+// custom routine (advanced), empty meant no check.
+const sanitizeProbeVerify = (raw, legacyGcode, holderZ) => {
+  const hasRaw = raw && typeof raw === 'object';
+  const legacy = typeof legacyGcode === 'string' ? legacyGcode.trim() : '';
+  const mode = hasRaw
+    ? (raw.mode === 'advanced' ? 'advanced' : 'simple')
+    : (legacy ? 'advanced' : 'simple');
+  return {
+    enabled: hasRaw ? raw.enabled !== false : !!legacy,
+    mode,
+    // Default a little above the holder so a first run is a free move
+    // rather than a crash; the operator sets it from the Probe page.
+    z: toFiniteNumber(hasRaw ? raw.z : undefined, holderZ + 20),
+    gcode: hasRaw ? (raw.gcode ?? '') : legacy
   };
 };
 
@@ -1255,6 +1278,45 @@ function probeHolderPosition(settings) {
   return { engaged, approach, parked: null, z: p.z, cup };
 }
 
+// Simple-mode verification routine, run right after the pickup while the
+// spindle is still at the holder. Rise to Verify Z (needle tip level with
+// the holder's mount), go back over the holder's centre, then probe
+// sideways toward the holder's edge: a working needle touches the rim
+// within a few millimetres. G38.2 raises the controller's probe alarm if
+// nothing is touched in the full travel, which aborts the tool change
+// before the probe is ever driven at the toolsetter. Back to centre, up
+// to safe Z, and the normal TLS follows. The sideways direction is the
+// holder's slide axis and direction (into the fork; for a cup the same
+// fields, which default from the rack).
+const PROBE_VERIFY_TRAVEL_MM = 12;
+const PROBE_VERIFY_FEED      = 150;
+function probeVerifyRoutine(settings) {
+  const p = settings.probe;
+  const v = p.verify;
+  const axis = p.slideAxis === 'Y' ? 'Y' : 'X';
+  const sign = p.slideDirection === 'Positive' ? '' : '-';
+  return `
+    (Verify probe: touch the holder edge)
+    G53 G0 Z${v.z}
+    G53 G0 X${p.x} Y${p.y}
+    G38.2 G91 ${axis}${sign}${PROBE_VERIFY_TRAVEL_MM} F${PROBE_VERIFY_FEED}
+    G90
+    G53 G0 X${p.x} Y${p.y}
+    G53 G0 Z${settings.zSafe}
+  `.trim().split('\n').map((l) => l.trim()).join('\n');
+}
+
+// The verification block that replaces the plain rise to safe Z after the
+// pickup: nothing when it is off, the generated routine in simple mode,
+// the operator's text in advanced mode. Either way the caller follows it
+// with its own rise to safe Z, so a custom routine need not end there.
+function probeVerifyGcode(settings) {
+  const v = settings.probe && settings.probe.verify;
+  if (!v || !v.enabled) return '';
+  if (v.mode === 'advanced') return (v.gcode || '').trim();
+  return probeVerifyRoutine(settings);
+}
+
 function probeSlideFeedrate(settings) {
   return settings.probe.slideSpeed > 0 ? settings.probe.slideSpeed : slideFeedrate(settings);
 }
@@ -1325,7 +1387,14 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
       G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
       G53 G0 Z${approachZ}`;
   const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
-  const verify = indentBlock(settings.probe.verifyGcode);
+  // The controller is told the probe is loaded (M61) as soon as it is
+  // clamped and clear of the holder — before the verification, so a
+  // failed check (alarm, abort) leaves the tool number matching what is
+  // physically in the spindle. Verification runs while the spindle is
+  // still at the holder, before the rise to safe Z (it rises to Verify Z
+  // itself); the rise to safe Z that follows is harmless when the routine
+  // already ended there.
+  const verify = indentBlock(probeVerifyGcode(settings));
   const toolNumber = settings.probe.toolNumber;
 
   if (h.cup) {
@@ -1335,9 +1404,9 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
       G4 P0.5
       ${auxLineFor(settings, 'clamp')}${drawbarSeat}
       G4 P${clampSettle}
-      G53 G0 Z${settings.zSafe}
       M61 Q${toolNumber}
       ${verify}
+      G53 G0 Z${settings.zSafe}
       ${tlsRoutine}
     `.trim();
   }
@@ -1351,9 +1420,9 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
     ${auxLineFor(settings, 'clamp')}${drawbarSeat}
     G4 P${clampSettle}
     G53 G1 X${h.approach.x} Y${h.approach.y} F${feed}
-    G53 G0 Z${settings.zSafe}
     M61 Q${toolNumber}
     ${verify}
+    G53 G0 Z${settings.zSafe}
     ${tlsRoutine}
   `.trim();
 }
@@ -1396,9 +1465,15 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   const sourceIsProbe = isProbeTool(settings, currentTool);
   const targetIsProbe = isProbeTool(settings, toolNumber);
   const holder = (sourceIsProbe || targetIsProbe) ? probeHolderPosition(settings) : null;
-  // Where the spindle rests after the probe is put down / picked up.
-  const holderRestXY = holder ? (holder.cup ? holder.engaged : (holder.parked || holder.approach)) : null;
-  const holderUnloadRestXY = holder ? holder.engaged : null;   // both styles lift off at engaged
+  // Where the spindle rests after the probe is picked up: at the holder's
+  // centre when the verification ran (it ends there), otherwise where the
+  // pickup itself finished — the slide-out point for a fork, the centre
+  // for a cup. And after a put-down: both styles lift off at the centre.
+  const verifyRuns = !!(settings.probe && settings.probe.verify && settings.probe.verify.enabled);
+  const holderRestXY = holder
+    ? ((verifyRuns || holder.cup) ? holder.engaged : holder.approach)
+    : null;
+  const holderUnloadRestXY = holder ? holder.engaged : null;
   // Probing decision:
   //   'always'  — probe on every M6.
   //   'library' — probe only when the tool has no TLO stored yet
@@ -1410,9 +1485,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   //   Reference yet (options.tlrMissing) — the first change after a boot
   //   re-establishes it even for a tool whose TLO is on file.
   const hasStoredTlo = Math.abs(storedTlo || 0) > 0.0001;
-  // The probe is always measured after a pickup, whatever the strategy.
+  // The probe follows the same strategy as any tool: with the library
+  // strategy and a TLO on file for its tool number (the Tool Library's
+  // "Probe" slot) the pickup loads the stored offset instead of probing.
   const shouldProbe = !!options.forceTls
-    || targetIsProbe
     || settings.tlsMode === 'always'
     || (settings.tlsMode === 'library' && (!hasStoredTlo || !!options.tlrMissing));
   const returnTo = options.returnTo || origin;
@@ -1526,9 +1602,13 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   //   * Otherwise (manual / T0→T0) → leave as-is; existing sequence handles it.
   let exitSection = '';
   const isCup = settings.rackHolding === 'Cup';
-  if (targetIsProbe) {
+  if (targetIsProbe && shouldProbe) {
     // Probe picked up and measured → spindle is at the toolsetter.
     exitSection = options.endAtTls ? '' : tlsExit(tlsX, tlsY, returnTo, settings);
+  } else if (targetIsProbe) {
+    // Probe picked up, stored TLO applied, no TLS → spindle is still at the
+    // holder at safe Z. Route home from there, around the rack keepout.
+    exitSection = `(probeExit: routePoint holder -> destination.)\n    ${probeRoute(holderRestXY, returnTo, settings, true)}`;
   } else if (sourceIsProbe && toolNumber === 0) {
     // Probe put down, spindle empty at the holder → route home.
     exitSection = `(probeExit: routePoint holder -> destination.)\n    ${probeRoute(holderUnloadRestXY, returnTo, settings, true)}`;
@@ -1856,7 +1936,7 @@ function onBeforeCommand(commands, context, settings) {
 }
 
 export {
-  onBeforeCommand, buildInitialConfig,
+  onBeforeCommand, buildInitialConfig, probeVerifyRoutine, probeVerifyGcode,
   rackEntrance, rackExit, cupEntrance, cupExit, tlsEntrance, tlsExit,
   computeKeepoutZone, slotEntryPoint, slotApproachPoint,
   buildLoadTool, buildUnloadTool, buildSlotNav, calculateSlotPosition,

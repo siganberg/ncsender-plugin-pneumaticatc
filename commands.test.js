@@ -48,6 +48,8 @@ import {
   createToolLengthSetProgram,
   routePoint,
   pickEntryEdge,
+  probeVerifyRoutine,
+  probeVerifyGcode,
 } from './commands.js';
 
 // Strip comment lines and blank lines so the assertions read against
@@ -2017,9 +2019,40 @@ describe('probe auto-loader — tool change programs', () => {
     assert.ok(text.includes('G53 G1 X230 Y-100 F700'), 'slides out along +X at the probe slide speed');
     assert.ok(text.includes('M61 Q99'), 'controller told the probe is loaded');
     assert.ok(text.includes('G38.3 G91 Z-2 F100'), 'verify block runs after pickup');
-    assert.ok(text.includes('G38.2 G91 Z-'), 'TLS runs even though library mode has a stored TLO');
-    assert.ok(text.indexOf('G38.3 G91 Z-2 F100') < text.indexOf('G38.2 G91 Z-'), 'verify precedes TLS');
+    // Library strategy with a TLO on file for T99: no TLS, the stored offset is loaded.
+    assert.ok(!text.includes('G38.2 G91 Z-'), 'library strategy with a stored TLO skips TLS for the probe too');
+    assert.ok(text.includes('G43.1 Z12.345'), 'stored TLO is applied');
+    assert.ok(text.indexOf('G38.3 G91 Z-2 F100') < text.indexOf('G43.1 Z12.345'), 'verify precedes the offset load');
+    assert.ok(text.indexOf('M61 Q99') < text.indexOf('G38.3 G91 Z-2 F100'), 'tool number is set before the verification');
     assert.ok(text.includes('MANUAL_') === false, 'no manual-tool dialog for the probe');
+  });
+
+  test('T0 → probe with no stored TLO (library) or with the always strategy: TLS runs', () => {
+    const noTlo = buildToolChangeProgram(base(), 0, 99, { x: 0, y: 0, z: 0 }, 0, origin).join('\n');
+    assert.ok(noTlo.includes('G38.2 G91 Z-'), 'no TLO on file → probe it');
+    const always = base(); always.tlsMode = 'always';
+    const alwaysText = buildToolChangeProgram(always, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin).join('\n');
+    assert.ok(alwaysText.includes('G38.2 G91 Z-'), 'always strategy → probe it');
+  });
+
+  test('T0 → probe with a stored TLO: the exit routes from the holder, not the toolsetter', () => {
+    // The field failure: with the library strategy and a TLO on file the
+    // pickup skips TLS, so the spindle is still at the holder — the old
+    // exit assumed the toolsetter and dragged the probe across the rack.
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin).join('\n');
+    const tlo = prog.indexOf('G43.1 Z12.345');
+    const tail = prog.slice(tlo);
+    assert.ok(tail.includes('probeExit'), 'exit is computed from the holder');
+    assert.ok(!tail.includes('tlsExit'), 'no toolsetter exit without a TLS');
+    assert.ok(!tail.includes('X300 Y300'), 'never heads for the toolsetter');
+    assert.ok(tail.trim().includes('G53 G0 X0 Y0'), 'ends at the origin');
+  });
+
+  test('T0 → probe with TLS: the exit leaves the toolsetter', () => {
+    const cfg = base(); cfg.tlsMode = 'always';
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin).join('\n');
+    assert.ok(prog.slice(prog.indexOf('G43.1 Z[')).includes('tlsExit'));
   });
 
   test('probe → T0 (cup): drop into the holder, re-clamp, route home', () => {
@@ -2072,5 +2105,63 @@ describe('probe auto-loader — tool change programs', () => {
     cfg.probe.enabled = false;
     const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 0, origin);
     assert.ok(prog.join('\n').includes('MANUAL_CLAMP_TOOL_99'));
+  });
+});
+
+describe('probe verification (simple / advanced)', () => {
+  const cfg = () => buildInitialConfig({
+    slots: 3, zSafe: -5, clampAuxOutput: 0,
+    probe: { enabled: true, toolNumber: 99, x: 200, y: -100, z: -90, verify: { enabled: true, mode: 'simple', z: -70 } }
+  });
+
+  test('simple mode: rise to Verify Z, centre, sideways touch, centre, safe Z', () => {
+    const lines = probeVerifyGcode(cfg()).split('\n').filter((l) => !l.startsWith('('));
+    assert.deepEqual(lines, [
+      'G53 G0 Z-70',
+      'G53 G0 X200 Y-100',
+      'G38.2 G91 X-12 F150',      // fork slides along X, Negative → toward the holder
+      'G90',
+      'G53 G0 X200 Y-100',
+      'G53 G0 Z-5',
+    ]);
+  });
+
+  test('simple mode follows the holder slide axis and direction', () => {
+    const c = cfg(); c.probe.slideAxis = 'Y'; c.probe.slideDirection = 'Positive';
+    assert.ok(probeVerifyGcode(c).includes('G38.2 G91 Y12 F150'));
+  });
+
+  test('advanced mode uses the operator text verbatim', () => {
+    const c = cfg(); c.probe.verify.mode = 'advanced'; c.probe.verify.gcode = 'G38.3 G91 Z-2 F100\nG90';
+    assert.equal(probeVerifyGcode(c), 'G38.3 G91 Z-2 F100\nG90');
+  });
+
+  test('disabled verification emits nothing', () => {
+    const c = cfg(); c.probe.verify.enabled = false;
+    assert.equal(probeVerifyGcode(c), '');
+  });
+
+  test('legacy verifyGcode migrates to advanced; empty legacy means off', () => {
+    const on = buildInitialConfig({ slots: 3, probe: { enabled: true, z: -90, verifyGcode: 'G4 P1' } });
+    assert.equal(on.probe.verify.mode, 'advanced');
+    assert.equal(on.probe.verify.enabled, true);
+    assert.equal(on.probe.verify.gcode, 'G4 P1');
+    const off = buildInitialConfig({ slots: 3, probe: { enabled: true, z: -90, verifyGcode: '' } });
+    assert.equal(off.probe.verify.enabled, false);
+    assert.equal(off.probe.verify.z, -70, 'defaults 20 mm above the holder');
+  });
+
+  test('the routine is spliced between M61 and TLS on a pickup', () => {
+    const c = buildInitialConfig({ slots: 3, orientation: 'Y', slot1: { x: -115, y: 40, z: -120 }, slotDistance: 80,
+      slideDirection: 'Negative', slideDistance: 40, keepoutPadding: 60, zSafe: -5, clampAuxOutput: 0,
+      toolsetter: { x: 300, y: 300 }, tlsMode: 'always',
+      probe: { enabled: true, toolNumber: 99, x: 200, y: -100, z: -90, slideAxis: 'X', slideDirection: 'Negative', slideDistance: 30, slideSpeed: 700,
+               verify: { enabled: true, mode: 'simple', z: -70 } } });
+    const text = buildToolChangeProgram(c, 0, 99, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }).join('\n');
+    const slideOut = text.indexOf('G53 G1 X230 Y-100'), verify = text.indexOf('G38.2 G91 X-12 F150');
+    const m61 = text.indexOf('M61 Q99'), tls = text.indexOf('G43.1 Z0');
+    assert.ok(slideOut !== -1 && slideOut < m61 && m61 < verify && verify < tls, 'slide out → M61 → verify → TLS');
+    // No rise to safe Z between the slide-out and the verify's own rise to Verify Z.
+    assert.ok(!text.slice(slideOut, verify).includes('G53 G0 Z-5'), 'goes to Verify Z straight from the holder');
   });
 });

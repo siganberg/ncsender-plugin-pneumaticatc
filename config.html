@@ -1601,8 +1601,43 @@
 
         <div class="pa-card pa-events-card" id="pa-probe-verify-card">
           <h3 class="pa-card-title">Verify Probe Loaded</h3>
-          <p class="pa-card-help">G-code run after the probe is picked up and before its TLS, to prove the tip actually triggers. Typically a short <code>G38.x</code> against a known surface — catching a dead needle here is what stops the machine driving the probe into the toolsetter later. Leave empty to skip the check.</p>
-          <div id="pa-probe-verify-editor" class="pa-monaco"></div>
+          <p class="pa-card-help">Runs after the probe is picked up and before its TLS, to prove the needle actually triggers. Catching a dead or bent needle here is what stops the machine driving the probe into the toolsetter later.</p>
+          <div class="pa-field-inline">
+            <label for="pa-probe-verify-enabled">Verify probe after pickup</label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-probe-verify-enabled" checked>
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+          <div id="pa-probe-verify-body">
+            <div class="pa-field-inline">
+              <label>Method</label>
+              <div class="pa-segment" id="pa-probe-verify-mode">
+                <button type="button" class="pa-segment-btn active" data-value="simple">Simple</button>
+                <button type="button" class="pa-segment-btn" data-value="advanced">Advanced</button>
+                <div class="pa-segment-indicator"></div>
+              </div>
+            </div>
+
+            <div id="pa-probe-verify-simple">
+              <p class="pa-card-help">Set <strong>Verify Z</strong> to the machine height where the needle tip sits level with the holder's mount. Right after the pickup the plugin rises to that height, goes back over the holder's centre and probes sideways toward the holder's edge (along the slide axis, into the holder) for up to 12&nbsp;mm at 150&nbsp;mm/min. A working needle touches the rim; no touch raises the controller's probe alarm and aborts the tool change. It then returns to the centre, rises to safe Z and carries on to TLS.</p>
+              <div class="pa-field-inline">
+                <label id="pa-label-probe-verify-z">Verify Z (mm)</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input class="pa-input" type="number" id="pa-probe-verify-z" value="-80" step="0.001">
+                  <button type="button" class="pa-btn pa-btn-sm" id="pa-probe-verify-grab">Grab current Z</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="pa-probe-verify-advanced">
+              <p class="pa-card-help">Your own routine, run right after the pickup while the spindle is still at the holder (fork: at the slide-out point, holder Z; cup: over the cup, holder Z). The plugin rises to safe Z afterwards. Switching to Advanced fills the editor with the Simple routine as a starting point; <em>Regenerate</em> rebuilds it from the current Simple settings. Machine coordinates are in mm.</p>
+              <div id="pa-probe-verify-editor" class="pa-monaco"></div>
+              <div style="margin-top: 8px;">
+                <button type="button" class="pa-btn pa-btn-sm" id="pa-probe-verify-regenerate">Regenerate from Simple</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2553,6 +2588,7 @@
   function relayoutProbeSegments() {
     if (segProbeSlideAxis) segProbeSlideAxis.relayout();
     if (segProbeSlideDir)  segProbeSlideDir.relayout();
+    if (segProbeVerifyMode) segProbeVerifyMode.relayout();
   }
   function updateProbeHoldingVisibility() {
     var block = $('pa-probe-fork-settings');
@@ -2563,6 +2599,60 @@
   }
   var probeHoldingSelect = $('pa-probe-holding');
   if (probeHoldingSelect) probeHoldingSelect.addEventListener('change', updateProbeHoldingVisibility);
+
+  // ---- Probe verification: Simple (generated) / Advanced (editor) ----
+  // Mirror of probeVerifyRoutine() in commands.js — keep the two in step.
+  // Emits machine coordinates in mm; the editor shows exactly what will run.
+  function generateProbeVerifyGcode() {
+    var px = toMetric(parseFloatOr($('pa-probe-x').value, 0));
+    var py = toMetric(parseFloatOr($('pa-probe-y').value, 0));
+    var vz = toMetric(parseFloatOr($('pa-probe-verify-z').value, -80));
+    var zSafe = Number.isFinite(initialConfig.zSafe) ? initialConfig.zSafe : 0;
+    var axis = segProbeSlideAxis && segProbeSlideAxis.get() === 'Y' ? 'Y' : 'X';
+    var sign = segProbeSlideDir && segProbeSlideDir.get() === 'Positive' ? '' : '-';
+    return [
+      '(Verify probe: touch the holder edge)',
+      'G53 G0 Z' + vz,
+      'G53 G0 X' + px + ' Y' + py,
+      'G38.2 G91 ' + axis + sign + '12 F150',
+      'G90',
+      'G53 G0 X' + px + ' Y' + py,
+      'G53 G0 Z' + zSafe
+    ].join('\n');
+  }
+  // Set while the saved mode is being restored at load, so the switch
+  // handler below doesn't treat it as the operator switching to Advanced
+  // and overwrite their saved routine with a freshly generated one.
+  var restoringVerifyMode = false;
+  var segProbeVerifyMode = initSegment('pa-probe-verify-mode', function(mode) {
+    updateProbeVerifyVisibility();
+    // Switching to Advanced seeds the editor from the Simple settings —
+    // only on a real switch, never while restoring the saved state.
+    if (mode === 'advanced' && probeVerifyEditor && !restoringVerifyMode) {
+      probeVerifyEditor.setValue(generateProbeVerifyGcode());
+      setTimeout(layoutMonaco, 0);
+    }
+  });
+  function updateProbeVerifyVisibility() {
+    var on = !!($('pa-probe-verify-enabled') && $('pa-probe-verify-enabled').checked);
+    var body = $('pa-probe-verify-body');
+    if (body) { body.style.opacity = on ? '' : '0.45'; body.style.pointerEvents = on ? '' : 'none'; }
+    var mode = segProbeVerifyMode ? segProbeVerifyMode.get() : 'simple';
+    var simple = $('pa-probe-verify-simple'), adv = $('pa-probe-verify-advanced');
+    if (simple) simple.style.display = mode === 'advanced' ? 'none' : '';
+    if (adv)    adv.style.display    = mode === 'advanced' ? '' : 'none';
+    if (mode === 'advanced') setTimeout(layoutMonaco, 0);
+  }
+  var verifyEnabledEl = $('pa-probe-verify-enabled');
+  if (verifyEnabledEl) verifyEnabledEl.addEventListener('change', updateProbeVerifyVisibility);
+  var verifyRegen = $('pa-probe-verify-regenerate');
+  if (verifyRegen) verifyRegen.addEventListener('click', function() {
+    if (probeVerifyEditor) probeVerifyEditor.setValue(generateProbeVerifyGcode());
+  });
+  var verifyGrab = $('pa-probe-verify-grab');
+  if (verifyGrab) verifyGrab.addEventListener('click', function() {
+    $('pa-probe-verify-z').value = fmtCoord(lastMPos.z);
+  });
 
   // Promise-based confirm modal. Resolves true (populate) / false (keep).
   function showAutoPopulateConfirm() {
@@ -2832,8 +2922,9 @@
     if ($('pa-pre-tls-editor'))  preTlsEditor  = monaco.editor.create($('pa-pre-tls-editor'),  Object.assign({}, opts, { value: initialConfig.preTlsGcode         || '' }));
     if ($('pa-post-tls-editor')) postTlsEditor = monaco.editor.create($('pa-post-tls-editor'), Object.assign({}, opts, { value: initialConfig.postTlsGcode        || '' }));
     if ($('pa-probe-verify-editor')) {
+      var savedVerify = initialConfig.probe && (initialConfig.probe.verify ? initialConfig.probe.verify.gcode : initialConfig.probe.verifyGcode);
       probeVerifyEditor = monaco.editor.create($('pa-probe-verify-editor'),
-        Object.assign({}, opts, { value: (initialConfig.probe && initialConfig.probe.verifyGcode) || '' }));
+        Object.assign({}, opts, { value: savedVerify || '' }));
     }
     // Editor shows only the user's addition. Prefer the explicit
     // `abortEventGcodeUser` field; fall back to stripping the
@@ -2927,6 +3018,20 @@
     $('pa-probe-x').value = fmtCoord(probe.x ?? 0);
     $('pa-probe-y').value = fmtCoord(probe.y ?? 0);
     $('pa-probe-z').value = fmtCoord(probe.z ?? -100);
+    // Verification. Configs saved before the Simple/Advanced split carried
+    // a bare verifyGcode string: non-empty meant a custom routine.
+    var verify = probe.verify || {
+      enabled: !!(probe.verifyGcode && probe.verifyGcode.trim()),
+      mode: (probe.verifyGcode && probe.verifyGcode.trim()) ? 'advanced' : 'simple',
+      z: (probe.z ?? -100) + 20,
+      gcode: probe.verifyGcode || ''
+    };
+    $('pa-probe-verify-enabled').checked = verify.enabled !== false;
+    $('pa-probe-verify-z').value = fmtCoord(verify.z ?? ((probe.z ?? -100) + 20));
+    restoringVerifyMode = true;
+    if (segProbeVerifyMode) segProbeVerifyMode.set(verify.mode === 'advanced' ? 'advanced' : 'simple');
+    restoringVerifyMode = false;
+    updateProbeVerifyVisibility();
     // Seed the number before clamping so a saved value survives; the clamp
     // only kicks in when the rack has since grown past it.
     $('pa-probe-tool').value = String(probe.toolNumber ?? PROBE_TOOL_DEFAULT);
@@ -2992,7 +3097,8 @@
       card.style.pointerEvents = on ? '' : 'none';
     }
     ['pa-probe-tool', 'pa-probe-holding', 'pa-probe-x', 'pa-probe-y', 'pa-probe-z', 'pa-probe-grab',
-     'pa-probe-slide-distance', 'pa-probe-slide-speed']
+     'pa-probe-slide-distance', 'pa-probe-slide-speed',
+     'pa-probe-verify-enabled', 'pa-probe-verify-z', 'pa-probe-verify-grab', 'pa-probe-verify-regenerate']
       .forEach(function(id) { var el = $(id); if (el) el.disabled = !on; });
     var verify = $('pa-probe-verify-card');
     if (verify) {
@@ -3010,6 +3116,7 @@
     $('pa-label-keepout-padding').textContent = 'Safety Margin (' + u + ')';
     $('pa-label-probe-slide-distance').textContent = 'Slide Distance (' + u + ')';
     $('pa-label-probe-slide-speed').textContent = 'Slide Speed (' + f + ')';
+    $('pa-label-probe-verify-z').textContent = 'Verify Z (' + u + ')';
     $('pa-label-seek-start-z').textContent = 'Seek Start Z (' + u + ')';
     $('pa-label-seek-distance').textContent = 'Seek Distance (' + u + ')';
     $('pa-label-seek-feedrate').textContent = 'Seek Feedrate (' + f + ')';
@@ -3112,9 +3219,12 @@
         x: toMetric(parseFloatOr($('pa-probe-x').value, 0)),
         y: toMetric(parseFloatOr($('pa-probe-y').value, 0)),
         z: toMetric(parseFloatOr($('pa-probe-z').value, -100)),
-        verifyGcode: probeVerifyEditor
-          ? probeVerifyEditor.getValue()
-          : ((initialConfig.probe && initialConfig.probe.verifyGcode) || '')
+        verify: {
+          enabled: $('pa-probe-verify-enabled').checked,
+          mode: segProbeVerifyMode ? segProbeVerifyMode.get() : 'simple',
+          z: toMetric(parseFloatOr($('pa-probe-verify-z').value, -80)),
+          gcode: probeVerifyEditor ? probeVerifyEditor.getValue() : ''
+        }
       },
 
       dialogBehavior: {
