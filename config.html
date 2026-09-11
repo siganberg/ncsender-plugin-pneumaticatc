@@ -1549,6 +1549,36 @@
             </div>
           </div>
 
+          <!-- Fork-only motion params for the probe holder (shown when Loading
+               Style = Fork). Its own set: the rack may be on Cup, or slide the
+               other way, and the holder can sit at any angle to the rack. -->
+          <div id="pa-probe-fork-settings" style="margin-top: 12px;">
+            <div class="pa-field-inline">
+              <label>Slide Axis</label>
+              <div class="pa-segment" id="pa-probe-slide-axis">
+                <button type="button" class="pa-segment-btn active" data-value="X">X</button>
+                <button type="button" class="pa-segment-btn" data-value="Y">Y</button>
+                <div class="pa-segment-indicator"></div>
+              </div>
+            </div>
+            <div class="pa-field-inline">
+              <label>Slide Direction</label>
+              <div class="pa-segment" id="pa-probe-slide-direction">
+                <button type="button" class="pa-segment-btn active" data-value="Negative">−</button>
+                <button type="button" class="pa-segment-btn" data-value="Positive">+</button>
+                <div class="pa-segment-indicator"></div>
+              </div>
+            </div>
+            <div class="pa-field-inline">
+              <label id="pa-label-probe-slide-distance">Slide Distance (mm)</label>
+              <input class="pa-input" type="number" id="pa-probe-slide-distance" value="40" min="0" step="0.1">
+            </div>
+            <div class="pa-field-inline">
+              <label id="pa-label-probe-slide-speed">Slide Speed (mm/min)</label>
+              <input class="pa-input" type="number" id="pa-probe-slide-speed" value="500" min="1" step="1">
+            </div>
+          </div>
+
           <div style="margin-top: 16px;">
             <label class="pa-group-label">Probe Position</label>
             <div class="pa-coord-row">
@@ -1939,6 +1969,7 @@
         c.classList.toggle('active', c.getAttribute('data-view') === target);
       });
       if (target === 'events' || target === 'probe') setTimeout(layoutMonaco, 0);
+      if (target === 'probe') setTimeout(relayoutProbeSegments, 0);
     });
   });
 
@@ -2469,7 +2500,11 @@
       get: function() {
         var b = qs('.pa-segment-btn.active', seg);
         return b ? b.getAttribute('data-value') : null;
-      }
+      },
+      // A segment initialised while its page is hidden measures its buttons
+      // at zero width, so the indicator never shows. Call once the page is
+      // visible to place it.
+      relayout: function() { moveIndicator(qs('.pa-segment-btn.active', seg)); }
     };
   }
 
@@ -2511,6 +2546,23 @@
   }
   var rackHoldingSelect = $('pa-rack-holding');
   if (rackHoldingSelect) rackHoldingSelect.addEventListener('change', updateRackHoldingVisibility);
+
+  // Probe holder: same rule — Cup drops top-down, Fork slides.
+  var segProbeSlideAxis = initSegment('pa-probe-slide-axis');
+  var segProbeSlideDir  = initSegment('pa-probe-slide-direction');
+  function relayoutProbeSegments() {
+    if (segProbeSlideAxis) segProbeSlideAxis.relayout();
+    if (segProbeSlideDir)  segProbeSlideDir.relayout();
+  }
+  function updateProbeHoldingVisibility() {
+    var block = $('pa-probe-fork-settings');
+    var holding = $('pa-probe-holding');
+    if (!block || !holding) return;
+    block.style.display = holding.value === 'Cup' ? 'none' : '';
+    if (holding.value !== 'Cup') setTimeout(relayoutProbeSegments, 0);
+  }
+  var probeHoldingSelect = $('pa-probe-holding');
+  if (probeHoldingSelect) probeHoldingSelect.addEventListener('change', updateProbeHoldingVisibility);
 
   // Promise-based confirm modal. Resolves true (populate) / false (keep).
   function showAutoPopulateConfirm() {
@@ -2867,6 +2919,11 @@
     var probe = initialConfig.probe || {};
     $('pa-probe-enabled').checked = !!probe.enabled;
     $('pa-probe-holding').value = probe.holding || 'Fork';
+    if (segProbeSlideAxis) segProbeSlideAxis.set(probe.slideAxis || 'X');
+    if (segProbeSlideDir)  segProbeSlideDir.set(probe.slideDirection || 'Negative');
+    $('pa-probe-slide-distance').value = fmtCoord(probe.slideDistance ?? 40);
+    $('pa-probe-slide-speed').value = fmtCoord(probe.slideSpeed ?? 500);
+    updateProbeHoldingVisibility();
     $('pa-probe-x').value = fmtCoord(probe.x ?? 0);
     $('pa-probe-y').value = fmtCoord(probe.y ?? 0);
     $('pa-probe-z').value = fmtCoord(probe.z ?? -100);
@@ -2934,7 +2991,8 @@
       card.style.opacity = on ? '' : '0.45';
       card.style.pointerEvents = on ? '' : 'none';
     }
-    ['pa-probe-tool', 'pa-probe-holding', 'pa-probe-x', 'pa-probe-y', 'pa-probe-z', 'pa-probe-grab']
+    ['pa-probe-tool', 'pa-probe-holding', 'pa-probe-x', 'pa-probe-y', 'pa-probe-z', 'pa-probe-grab',
+     'pa-probe-slide-distance', 'pa-probe-slide-speed']
       .forEach(function(id) { var el = $(id); if (el) el.disabled = !on; });
     var verify = $('pa-probe-verify-card');
     if (verify) {
@@ -2950,6 +3008,8 @@
     $('pa-label-slide-distance').textContent = 'Slide Distance (' + u + ')';
     $('pa-label-slide-speed').textContent = 'Slide Speed (' + f + ')';
     $('pa-label-keepout-padding').textContent = 'Safety Margin (' + u + ')';
+    $('pa-label-probe-slide-distance').textContent = 'Slide Distance (' + u + ')';
+    $('pa-label-probe-slide-speed').textContent = 'Slide Speed (' + f + ')';
     $('pa-label-seek-start-z').textContent = 'Seek Start Z (' + u + ')';
     $('pa-label-seek-distance').textContent = 'Seek Distance (' + u + ')';
     $('pa-label-seek-feedrate').textContent = 'Seek Feedrate (' + f + ')';
@@ -3045,6 +3105,10 @@
         toolNumber: Math.max(probeToolFloor(),
                              parseInt($('pa-probe-tool').value, 10) || PROBE_TOOL_DEFAULT),
         holding: $('pa-probe-holding').value || 'Fork',
+        slideAxis: segProbeSlideAxis ? segProbeSlideAxis.get() : 'X',
+        slideDirection: segProbeSlideDir ? segProbeSlideDir.get() : 'Negative',
+        slideDistance: toMetric(parseFloatOr($('pa-probe-slide-distance').value, 40)),
+        slideSpeed: toMetric(parseFloatOr($('pa-probe-slide-speed').value, 500)),
         x: toMetric(parseFloatOr($('pa-probe-x').value, 0)),
         y: toMetric(parseFloatOr($('pa-probe-y').value, 0)),
         z: toMetric(parseFloatOr($('pa-probe-z').value, -100)),
@@ -3227,7 +3291,14 @@
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tool: { count: payload.slots, source: 'com.ncsender.pneumaticatc', manual: true, tls: true, probe: false }
+          // `probe` shows the Probe button in the visualizer's tool legend
+          // next to the slots, Manual and TLS; `probeToolNumber` is what that
+          // button loads, so the core and this plugin agree on the number.
+          tool: {
+            count: payload.slots, source: 'com.ncsender.pneumaticatc', manual: true, tls: true,
+            probe: !!(payload.probe && payload.probe.enabled),
+            probeToolNumber: (payload.probe && payload.probe.toolNumber) || 99
+          }
         })
       });
     } catch (err) {

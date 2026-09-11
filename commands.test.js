@@ -1958,3 +1958,119 @@ describe('$MEASURE_TLO — measure-all batch step', () => {
     assert.ok(!lines.some((l) => /^G38\.2/.test(l)), 'no probe on the way out');
   });
 });
+
+describe('probe auto-loader config', () => {
+  test('fork fields default from the rack and its slide axis', () => {
+    const cfg = buildInitialConfig({ slots: 6, orientation: 'Y', slideDirection: 'Positive', slideDistance: 35, slideSpeed: 900 });
+    assert.equal(cfg.probe.holding, 'Fork');
+    assert.equal(cfg.probe.slideAxis, 'X');            // rack along Y slides along X
+    assert.equal(cfg.probe.slideDirection, 'Positive');
+    assert.equal(cfg.probe.slideDistance, 35);
+    assert.equal(cfg.probe.slideSpeed, 900);
+    assert.equal(cfg.probe.toolNumber, 99);
+  });
+
+  test('fork fields set on the probe win over the rack', () => {
+    const cfg = buildInitialConfig({
+      slots: 6, orientation: 'Y', slideDirection: 'Positive', slideDistance: 35, slideSpeed: 900,
+      probe: { enabled: true, toolNumber: 20, holding: 'Fork', slideAxis: 'Y', slideDirection: 'Negative', slideDistance: 25, slideSpeed: 400 }
+    });
+    assert.equal(cfg.probe.enabled, true);
+    assert.equal(cfg.probe.toolNumber, 20);
+    assert.equal(cfg.probe.slideAxis, 'Y');
+    assert.equal(cfg.probe.slideDirection, 'Negative');
+    assert.equal(cfg.probe.slideDistance, 25);
+    assert.equal(cfg.probe.slideSpeed, 400);
+  });
+
+  test('probe tool number is clamped above the rack', () => {
+    const cfg = buildInitialConfig({ slots: 8, probe: { toolNumber: 3 } });
+    assert.equal(cfg.probe.toolNumber, 9);
+  });
+});
+
+describe('probe auto-loader — tool change programs', () => {
+  // Rack along Y at X=-115 (keepout X -175..-55, Y -20..260). Probe holder
+  // sits well clear of it at (200, -100), fork slides along X.
+  const base = () => buildInitialConfig({
+    ...RACK,
+    slot1: { x: -115, y: 40, z: -120 },
+    zSafe: -5, clampAuxOutput: 0,
+    toolsetter: { x: 300, y: 300 },
+    manualTool: { x: 500, y: 500 },
+    tlsMode: 'library',
+    probe: { enabled: true, toolNumber: 99, holding: 'Fork', slideAxis: 'X', slideDirection: 'Negative',
+             slideDistance: 30, slideSpeed: 700, x: 200, y: -100, z: -90, verifyGcode: 'G38.3 G91 Z-2 F100\nG90' }
+  });
+  const origin = { x: 0, y: 0 };
+
+  test('T0 → probe (fork): slide out of the holder, verify, then always TLS', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin);
+    const lines = motionLines(prog.join('\n'));
+    const text = lines.join('\n');
+    // Descends onto the probe at the holder, clamps, slides to the approach
+    // (X 230 = 200 - (-1 * 30)) at the probe's own feed, lifts.
+    assert.ok(text.includes('G53 G0 X200 Y-100'), 'moves over the holder engaged point');
+    assert.ok(text.includes('G53 G0 Z-89'), 'approach height is holder Z + drawbar offset');
+    assert.ok(text.includes('G53 G1 Z-90 F300'), 'drawbar seat to holder Z');
+    assert.ok(text.includes('G53 G1 X230 Y-100 F700'), 'slides out along +X at the probe slide speed');
+    assert.ok(text.includes('M61 Q99'), 'controller told the probe is loaded');
+    assert.ok(text.includes('G38.3 G91 Z-2 F100'), 'verify block runs after pickup');
+    assert.ok(text.includes('G38.2 G91 Z-'), 'TLS runs even though library mode has a stored TLO');
+    assert.ok(text.indexOf('G38.3 G91 Z-2 F100') < text.indexOf('G38.2 G91 Z-'), 'verify precedes TLS');
+    assert.ok(text.includes('MANUAL_') === false, 'no manual-tool dialog for the probe');
+  });
+
+  test('probe → T0 (cup): drop into the holder, re-clamp, route home', () => {
+    const cfg = base();
+    cfg.probe.holding = 'Cup';
+    const prog = buildToolChangeProgram(cfg, 99, 0, { x: 0, y: 0, z: 0 }, 0, origin);
+    const text = motionLines(prog.join('\n')).join('\n');
+    assert.ok(text.includes('G53 G0 X200 Y-100'), 'routes to the cup');
+    assert.ok(text.includes('G53 G0 Z-90'), 'drops to the holder Z');
+    assert.ok(text.includes('G53 G1 Z-89 F300'), 'drawbar back-off after release');
+    assert.ok(text.includes('M61 Q0'));
+    assert.ok(!text.includes('G1 X') || !text.includes('F700'), 'no fork slide for a cup holder');
+    assert.ok(!text.includes('G38.2'), 'no TLS on a put-down');
+    assert.ok(text.trim().endsWith('G[#<return_units>]') || text.includes('G53 G0 X0 Y0'), 'returns toward the origin');
+  });
+
+  test('T1 → probe: rack unload chains into a rack exit toward the holder', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 1, 99, { x: 0, y: 0, z: 0 }, 0, origin);
+    const text = motionLines(prog.join('\n')).join('\n');
+    const unloadIdx = text.indexOf('M61 Q0');
+    const loadIdx = text.indexOf('M61 Q99');
+    assert.ok(unloadIdx !== -1 && loadIdx !== -1 && unloadIdx < loadIdx, 'unload then load');
+    // Leaves the rack via its sliding-side edge (X -55) before heading to the holder.
+    assert.ok(text.slice(unloadIdx, loadIdx).includes('G53 G0 X-55'), 'rack exit to the sliding edge');
+    assert.ok(text.includes('G53 G1 X230 Y-100 F700'));
+  });
+
+  test('probe → T2: put the probe down, then a normal rack load from the holder', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 99, 2, { x: 0, y: 0, z: 0 }, 0, origin);
+    const text = motionLines(prog.join('\n')).join('\n');
+    assert.ok(text.indexOf('M61 Q0') < text.indexOf('M61 Q2'));
+    assert.ok(text.includes('G53 G1 X200 Y-100 F700'), 'slides into the fork to put the probe down');
+    assert.ok(text.includes('rackEntrance') === false, 'comments stripped');
+    assert.ok(text.includes('G53 G0 X-115 Y120'), 'ends up over slot 2');
+  });
+
+  test('probe is not treated as a manual tool when swapping with one', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 99, 5, { x: 0, y: 0, z: 0 }, 0, origin);
+    // The dialog markers are (MSG, …) comment lines, so read the raw program.
+    const text = prog.join('\n');
+    assert.ok(!text.includes('MANUAL_SWAP_TOOL'), 'not collapsed into a manual swap');
+    assert.ok(text.includes('MANUAL_CLAMP_TOOL_5'), 'manual load dialog still shows for the manual tool');
+  });
+
+  test('disabled loader: the probe number is an ordinary manual tool', () => {
+    const cfg = base();
+    cfg.probe.enabled = false;
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 0, origin);
+    assert.ok(prog.join('\n').includes('MANUAL_CLAMP_TOOL_99'));
+  });
+});
