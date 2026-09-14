@@ -255,6 +255,15 @@ const buildInitialConfig = (raw = {}) => {
     toolRackAuxOutput: sanitizeAuxOutput(raw.toolRackAuxOutput),
     toolRackAvailableSensorInput: sanitizeAuxInput(raw.toolRackAvailableSensorInput),
     toolRackUnavailableSensorInput: sanitizeAuxInput(raw.toolRackUnavailableSensorInput),
+    // Dwell after reaching Z-safe, before actuating. Two consecutive G0
+    // moves (the Z-safe retract, then whatever XY comes next) can be
+    // blended by the controller's planner instead of fully stopping in
+    // between, so Z-safe being "reached" in the gcode doesn't guarantee
+    // the axis has actually finished traveling there before XY motion
+    // starts. Reported on hardware as the rack withdrawing while the
+    // spindle was still on its way up. A dwell is a hard planner sync
+    // point, forcing Z to genuinely finish first.
+    toolRackSettleSec: toFiniteNumber(raw.toolRackSettleSec, 10),
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -1118,6 +1127,7 @@ function extendToolRack(settings, oNum) {
   const { on } = auxOnOff(settings.toolRackAuxOutput);
   return `
     G53 G0 Z${settings.zSafe}
+    G4 P${toFiniteNumber(settings.toolRackSettleSec, 10)}
     ${on}
     ${toolRackAvailableGuard(settings, oNum)}
   `.trim();
@@ -1127,6 +1137,7 @@ function retractToolRack(settings, oNum) {
   const { off } = auxOnOff(settings.toolRackAuxOutput);
   return `
     G53 G0 Z${settings.zSafe}
+    G4 P${toFiniteNumber(settings.toolRackSettleSec, 10)}
     ${off}
     ${toolRackUnavailableGuard(settings, oNum)}
   `.trim();
