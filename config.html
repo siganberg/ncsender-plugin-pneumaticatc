@@ -1690,14 +1690,6 @@
               <option value="">N/A</option>
             </select>
           </div>
-
-          <div class="pa-field" style="margin-top: 12px; max-width: 220px;">
-            <label for="pa-adv-toolrack-settle">
-              Settle (s)
-              <span class="pa-help-tip" title="Dwell after reaching Z-safe, before actuating the rack. Two back-to-back rapid moves can be blended by the controller instead of fully stopping in between, so reaching Z-safe in the gcode doesn't guarantee the axis has actually finished traveling. The dwell forces a hard stop first.">?</span>
-            </label>
-            <input class="pa-input" type="number" id="pa-adv-toolrack-settle" value="10" min="0" step="0.5">
-          </div>
         </div>
 
         <div class="pa-card" id="pa-adv-taper-blow-card">
@@ -2818,10 +2810,6 @@
     setAdvPin('pa-adv-input-toolrack-available', (typeof savedRackAvailable === 'number' && savedRackAvailable >= 0) ? savedRackAvailable : '');
     var savedRackUnavailable = initialConfig.toolRackUnavailableSensorInput;
     setAdvPin('pa-adv-input-toolrack-unavailable', (typeof savedRackUnavailable === 'number' && savedRackUnavailable >= 0) ? savedRackUnavailable : '');
-    var rackSettleInput = $('pa-adv-toolrack-settle');
-    if (rackSettleInput) {
-      rackSettleInput.value = String(typeof initialConfig.toolRackSettleSec === 'number' ? initialConfig.toolRackSettleSec : 10);
-    }
 
     var taperBlowInput = $('pa-adv-taper-blow');
     if (taperBlowInput) taperBlowInput.checked = !!initialConfig.taperBlow;
@@ -2970,10 +2958,6 @@
         var n = Number.parseInt(sel ? sel.value : '', 10);
         return Number.isFinite(n) && n >= 0 ? n : -1;
       })(),
-      // Dwell after reaching Z-safe, before actuating the rack — forces
-      // a hard planner stop so the Z move can't still be blending into
-      // the next line when the rack starts moving.
-      toolRackSettleSec: parseFloatOr($('pa-adv-toolrack-settle') ? $('pa-adv-toolrack-settle').value : '', 10),
       // Taper blow / cone clean plumbed off the drawbar valve.
       taperBlow: $('pa-adv-taper-blow') ? $('pa-adv-taper-blow').checked : false,
       taperBlowReleaseSettleSec: parseFloatOr($('pa-adv-taper-blow-settle') ? $('pa-adv-taper-blow-settle').value : '', 0.5),

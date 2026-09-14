@@ -255,15 +255,6 @@ const buildInitialConfig = (raw = {}) => {
     toolRackAuxOutput: sanitizeAuxOutput(raw.toolRackAuxOutput),
     toolRackAvailableSensorInput: sanitizeAuxInput(raw.toolRackAvailableSensorInput),
     toolRackUnavailableSensorInput: sanitizeAuxInput(raw.toolRackUnavailableSensorInput),
-    // Dwell after reaching Z-safe, before actuating. Two consecutive G0
-    // moves (the Z-safe retract, then whatever XY comes next) can be
-    // blended by the controller's planner instead of fully stopping in
-    // between, so Z-safe being "reached" in the gcode doesn't guarantee
-    // the axis has actually finished traveling there before XY motion
-    // starts. Reported on hardware as the rack withdrawing while the
-    // spindle was still on its way up. A dwell is a hard planner sync
-    // point, forcing Z to genuinely finish first.
-    toolRackSettleSec: toFiniteNumber(raw.toolRackSettleSec, 10),
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -1122,12 +1113,17 @@ function rackOutputConfigured(settings) {
   return settings.toolRackAuxOutput === 'M7' || settings.toolRackAuxOutput === 'M8'
     || (typeof settings.toolRackAuxOutput === 'number' && settings.toolRackAuxOutput >= 0);
 }
+// G4 P0 forces a hard planner sync point: unlike two consecutive G0 moves,
+// which the controller can blend instead of fully stopping in between, a
+// dwell (even a zero-length one) can't start until all queued motion has
+// truly come to rest. That's what keeps the rack from actuating while the
+// Z-safe move above is still in flight — the dwell time itself is moot.
 function extendToolRack(settings, oNum) {
   if (!rackOutputConfigured(settings)) return '';
   const { on } = auxOnOff(settings.toolRackAuxOutput);
   return `
     G53 G0 Z${settings.zSafe}
-    G4 P${toFiniteNumber(settings.toolRackSettleSec, 10)}
+    G4 P0
     ${on}
     ${toolRackAvailableGuard(settings, oNum)}
   `.trim();
@@ -1137,7 +1133,7 @@ function retractToolRack(settings, oNum) {
   const { off } = auxOnOff(settings.toolRackAuxOutput);
   return `
     G53 G0 Z${settings.zSafe}
-    G4 P${toFiniteNumber(settings.toolRackSettleSec, 10)}
+    G4 P0
     ${off}
     ${toolRackUnavailableGuard(settings, oNum)}
   `.trim();

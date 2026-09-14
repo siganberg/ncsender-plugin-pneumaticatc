@@ -2805,23 +2805,14 @@ describe('retractable tool rack — extend/retract around rack-slot motion', () 
   // actually finished traveling there before the rack actuated — reported
   // on hardware as the rack moving while the spindle was still in transit.
   // A dwell is a hard planner sync point that can't start counting down
-  // until the Z move has genuinely finished.
+  // until the Z move has genuinely finished — even a zero-length one, so
+  // there's nothing to configure here.
   test('extend and retract each dwell right after their Z-safe move, before actuating', () => {
     const lines = motionLines(buildToolChangeProgram(WITH_RACK, 0, 1).join('\n'));
     const extendIdx = lines.indexOf('M64 P3');
     const retractIdx = lines.indexOf('M65 P3');
     assert.ok(extendIdx > 0 && retractIdx > 0, 'extend and retract must both be present');
-    assert.equal(lines[extendIdx - 1], 'G4 P10', 'extend must dwell (default 10s) right after Z-safe, before actuating');
-    assert.equal(lines[retractIdx - 1], 'G4 P10', 'retract must dwell (default 10s) right after Z-safe, before actuating');
-  });
-
-  test('the settle dwell honors a configured toolRackSettleSec instead of the 10s default', () => {
-    const shorterSettle = { ...WITH_RACK, toolRackSettleSec: 2.5 };
-    const lines = motionLines(buildToolChangeProgram(shorterSettle, 0, 1).join('\n'));
-    const extendIdx = lines.indexOf('M64 P3');
-    const retractIdx = lines.indexOf('M65 P3');
-    assert.ok(extendIdx > 0 && retractIdx > 0, 'extend and retract must both be present');
-    assert.equal(lines[extendIdx - 1], 'G4 P2.5', 'extend must dwell for the configured settle time, not the hardcoded default');
-    assert.equal(lines[retractIdx - 1], 'G4 P2.5', 'retract must dwell for the configured settle time, not the hardcoded default');
+    assert.equal(lines[extendIdx - 1], 'G4 P0', 'extend must dwell right after Z-safe, before actuating');
+    assert.equal(lines[retractIdx - 1], 'G4 P0', 'retract must dwell right after Z-safe, before actuating');
   });
 });
