@@ -295,11 +295,19 @@ const buildInitialConfig = (raw = {}) => {
 //                             TLS probe motion (e.g. for oddball fixtures).
 //                             Separate from TLO.
 
+// A T number names a slot first, then a Tool ID — the order the app itself
+// uses — so a tool that isn't in any slot still gets its own offsets rather
+// than silently getting none. Offsets belong to the tool, never the slot.
+function findTool(toolNumber, tools) {
+  return tools.find((t) => t.toolNumber === toolNumber)
+    || tools.find((t) => t.toolId === toolNumber);
+}
+
 function getToolProbeOffsets(toolNumber, tools) {
   if (!toolNumber || toolNumber <= 0 || !Array.isArray(tools)) {
     return { x: 0, y: 0, z: 0 };
   }
-  const tool = tools.find((t) => t.toolNumber === toolNumber);
+  const tool = findTool(toolNumber, tools);
   if (tool && tool.offsets) {
     return { x: tool.offsets.x || 0, y: tool.offsets.y || 0, z: tool.offsets.tlsZ || 0 };
   }
@@ -308,7 +316,7 @@ function getToolProbeOffsets(toolNumber, tools) {
 
 function getStoredTlo(toolNumber, tools) {
   if (!toolNumber || toolNumber <= 0 || !Array.isArray(tools)) return 0;
-  const tool = tools.find((t) => t.toolNumber === toolNumber);
+  const tool = findTool(toolNumber, tools);
   if (!tool || !tool.offsets) return 0;
   return tool.offsets.z || 0;
 }
