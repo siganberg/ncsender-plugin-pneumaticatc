@@ -326,6 +326,33 @@ const getToolOffsets = getToolProbeOffsets;
 
 // === G-code helpers ===
 
+// Withholds the `$keepout_off` prefix from a single line (see formatGCode,
+// which strips the marker before the line is sent).
+const CORE_CHECKED_MARKER = '(ncs-checked)';
+
+// Every G53 leg this plugin emits is rack routing it computed itself and
+// can vouch for — except the last one. The exit legs end at `returnTo`,
+// which is wherever the operator happened to leave the spindle when they
+// typed M6, and cancelling a tool load leaves it parked INSIDE the rack.
+// Blanket-prefixing that leg asserts a safety property this plugin has no
+// basis to assert, and drives the spindle back into the studs.
+//
+// Hand just that leg to the core's keepout check instead: if the
+// destination is clear it runs exactly as before, and if it is inside the
+// zone the core refuses it and the spindle stays at the rack edge — the
+// position the exit routing just brought it to, which is known safe.
+function handFinalLegToCoreCheck(section) {
+  if (!section) return section;
+  const lines = section.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/(^|[^A-Z])G0*53(?:[^0-9]|$)/i.test(lines[i])) {
+      lines[i] = `${lines[i]} ${CORE_CHECKED_MARKER}`;
+      break;
+    }
+  }
+  return lines.join('\n');
+}
+
 function formatGCode(gcode) {
   const lines = gcode.split('\n').map((l) => l.trim()).filter((l) => l !== '');
   const formatted = [];
@@ -352,9 +379,14 @@ function formatGCode(gcode) {
     // parser, so the token would just get logged as an unknown command
     // — we omit it there.
     const isMachineMove = /(^|[^A-Z])G0*53(?:[^0-9]|$)/i.test(line);
-    const prefixed = (isMachineMove && _coreEdition === 'pro')
-      ? `$keepout_off ${line}`
+    // A leg marked by handFinalLegToCoreCheck keeps its keepout check.
+    const coreChecked = line.includes(CORE_CHECKED_MARKER);
+    const emitted = coreChecked
+      ? line.replace(CORE_CHECKED_MARKER, '').trimEnd()
       : line;
+    const prefixed = (isMachineMove && !coreChecked && _coreEdition === 'pro')
+      ? `$keepout_off ${emitted}`
+      : emitted;
     formatted.push(indent + prefixed);
     if (isOCode && (
       upperLine.includes(' IF ') || upperLine.includes(' WHILE ') ||
@@ -534,6 +566,10 @@ function createToolLengthSetExitMove(settings, toolOffsets = { x: 0, y: 0, z: 0 
 
 function createToolLengthSetProgram(settings, toolOffsets = { x: 0, y: 0, z: 0 }, options = {}) {
   const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, options).join('\n');
+  // `returnTo` is operator-chosen, not plugin-computed — the one
+  // destination in this program the plugin cannot vouch for.
+  exitSection = handFinalLegToCoreCheck(exitSection);
+
   const preCmd = settings.preToolChangeGcode?.trim() || '';
   const postCmd = settings.postToolChangeGcode?.trim() || '';
   const tlsExitMove = createToolLengthSetExitMove(settings, toolOffsets, options);
