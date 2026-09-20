@@ -1,4 +1,4 @@
 ## What's Changed
 
-### 🔧 Improvements
-- The final exit move of a tool change is now checked by the core application, providing more consistent safety validation at the end of tool changes
+### 🐛 Bug Fixes
+- Fixed the final-leg check so it now runs at the correct point during operation
