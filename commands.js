@@ -566,10 +566,6 @@ function createToolLengthSetExitMove(settings, toolOffsets = { x: 0, y: 0, z: 0 
 
 function createToolLengthSetProgram(settings, toolOffsets = { x: 0, y: 0, z: 0 }, options = {}) {
   const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, options).join('\n');
-  // `returnTo` is operator-chosen, not plugin-computed — the one
-  // destination in this program the plugin cannot vouch for.
-  exitSection = handFinalLegToCoreCheck(exitSection);
-
   const preCmd = settings.preToolChangeGcode?.trim() || '';
   const postCmd = settings.postToolChangeGcode?.trim() || '';
   const tlsExitMove = createToolLengthSetExitMove(settings, toolOffsets, options);
@@ -1667,6 +1663,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
       ? cupExit(targetSlot.engaged, returnTo, settings)
       : rackExitToOrigin(targetSlot.engaged, /* isEmpty */ false, returnTo, settings);
   }
+
+  // `returnTo` is operator-chosen, not plugin-computed — the one
+  // destination in this program the plugin cannot vouch for.
+  exitSection = handFinalLegToCoreCheck(exitSection);
 
   const preCmd = settings.preToolChangeGcode?.trim() || '';
   const postCmd = settings.postToolChangeGcode?.trim() || '';

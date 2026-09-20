@@ -2165,3 +2165,60 @@ describe('probe verification (simple / advanced)', () => {
     assert.ok(!text.slice(slideOut, verify).includes('G53 G0 Z-5'), 'goes to Verify Z straight from the holder');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The final exit leg must keep its keepout check.
+//
+// Every G53 leg this plugin emits is rack routing it computed itself, so it
+// opts out of the core's keepout check with `$keepout_off` — the rack slots
+// genuinely sit inside the published zone. The exception is the LAST leg:
+// it ends at `returnTo`, which is wherever the operator left the spindle
+// when they typed M6. Cancel a tool load and that is a point inside the
+// rack, and a blanket opt-out drove the spindle back into the studs.
+//
+// These pin both halves: rack routing still opts out, the final leg does
+// not, and the marker that arranges it never reaches the controller.
+// ---------------------------------------------------------------------------
+describe('final exit leg is left for the core keepout check', () => {
+  const settings = buildInitialConfig({
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5,
+    clampAuxOutput: 1,
+  });
+
+  // Drives a real M6 through onBeforeCommand so the Pro edition marker is
+  // set — the prefix is Pro-only, and buildToolChangeProgram alone would
+  // not exercise it.
+  const runM6 = (tool, mpos) => {
+    const commands = [{ command: 'M6 T1', isOriginal: true }];
+    onBeforeCommand(commands, { edition: 'pro', machineState: { tool, mpos }, tools: [] }, { ...settings });
+    return commands.map((c) => c.command.trim());
+  };
+
+  test('rack routing still opts out, but the last G53 leg does not', () => {
+    const lines = runM6(0, { x: 10, y: 20 });
+    const machineMoves = lines.filter((l) => /(^|[^A-Z])G0*53(?:[^0-9]|$)/i.test(l));
+    assert.ok(machineMoves.length > 1, 'expected several G53 legs in a tool change');
+
+    const lastMove = machineMoves[machineMoves.length - 1];
+    assert.doesNotMatch(lastMove, /\$keepout_off/,
+      `the final leg must stay checked, got: ${lastMove}`);
+
+    const earlier = machineMoves.slice(0, -1);
+    assert.ok(earlier.some((l) => /\$keepout_off/.test(l)),
+      'rack routing must still carry the opt-out');
+  });
+
+  test('the marker never reaches the controller', () => {
+    const lines = runM6(0, { x: 10, y: 20 });
+    assert.ok(!lines.some((l) => l.includes('ncs-checked')),
+      'the internal marker must be stripped before dispatch');
+  });
+
+  test('a non-Pro core gets no prefix at all and no marker', () => {
+    const commands = [{ command: 'M6 T1', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 0, mpos: { x: 10, y: 20 } }, tools: [] }, { ...settings });
+    const lines = commands.map((c) => c.command.trim());
+    assert.ok(!lines.some((l) => l.includes('$keepout_off')));
+    assert.ok(!lines.some((l) => l.includes('ncs-checked')));
+  });
+});
