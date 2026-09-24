@@ -42,17 +42,17 @@
     },
     "DRAWBAR_FAILED_TO_OPEN": {
       "title": "Drawbar Did Not Open",
-      "message": "The drawbar was commanded open but the drawbar sensor never reported it moving, so the tool change has stopped before relying on a release that did not happen.<br><br>The usual cause is no air: check that the compressor is running and up to pressure, the regulator is set, and no line is kinked or disconnected. Also check the solenoid and the sensor itself.<br><br>Fix the fault and click <em>\"Continue\"</em> to carry on from here, or <em>\"Abort\"</em> to stop the tool change. The sensor is not read again, so only continue once you can see the drawbar is open.",
+      "message": "The drawbar was commanded open but the drawbar sensor never reported it moving, so the tool change has stopped before relying on a release that did not happen.<br><br>The usual cause is no air: check that the compressor is running and up to pressure, the regulator is set, and no line is kinked or disconnected. Also check the solenoid and the sensor itself.<br><br>Fix the fault and click <em>\"Continue\"</em> to carry on from here, or <em>\"Abort\"</em> to stop the tool change. The sensor is not read again, so only continue once you can see the drawbar is open.<br><br>The spindle is clear of the rack so you can get to it. Continuing puts it back where it was and carries on from there.",
       "continueLabel": "Continue"
     },
     "DRAWBAR_FAILED_TO_CLOSE": {
       "title": "Drawbar Did Not Close",
-      "message": "The drawbar was commanded closed but the drawbar sensor still reports it open, so the tool is not gripped. The sequence has stopped here rather than move and drop it.<br><br>Check air pressure, the solenoid, and that nothing is fouling the drawbar or the pull stud.<br><br>Support the tool before clicking anything. Click <em>\"Continue\"</em> to carry on from here, or <em>\"Abort\"</em> to stop the tool change.",
+      "message": "The drawbar was commanded closed but the drawbar sensor still reports it open, so the tool is not gripped. The sequence has stopped here rather than move and drop it.<br><br>Check air pressure, the solenoid, and that nothing is fouling the drawbar or the pull stud.<br><br>Support the tool before clicking anything. Click <em>\"Continue\"</em> to carry on from here, or <em>\"Abort\"</em> to stop the tool change.<br><br>The spindle is clear of the rack so you can get to it. Continuing puts it back where it was and carries on from there.",
       "continueLabel": "Continue"
     },
     "TOOL_FAILED_TO_SEAT": {
       "title": "No Tool In Spindle",
-      "message": "The drawbar closed, but the tool sensor does not detect a tool in the spindle. The holder may be mis-seated, the slot may have been empty, or the tool did not come up with the drawbar.<br><br>Inspect the slot and the spindle taper, and seat the tool by hand if needed.<br><br>Click <em>\"Continue\"</em> to carry on from here, or <em>\"Abort\"</em> to stop the tool change. The sensor is not read again, so only continue once the tool is actually in place.",
+      "message": "The drawbar closed, but the tool sensor does not detect a tool in the spindle. The holder may be mis-seated, the slot may have been empty, or the tool did not come up with the drawbar.<br><br>Inspect the slot and the spindle taper, and seat the tool by hand if needed.<br><br>Click <em>\"Continue\"</em> to carry on from here, or <em>\"Abort\"</em> to stop the tool change. The sensor is not read again, so only continue once the tool is actually in place.<br><br>The spindle is clear of the rack so you can get to it. Continuing puts it back where it was and carries on from there.",
       "continueLabel": "Continue"
     },
     "TOOL_STILL_GRIPPED": {

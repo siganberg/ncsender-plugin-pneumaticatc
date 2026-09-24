@@ -1160,34 +1160,59 @@ const TOOL_SENSE_WAIT_SEC = 0.5;
 // `M66 Pundefined` into a live tool change. Demand an actual integer >= 0.
 const auxInputConfigured = (pin) => Number.isInteger(pin) && pin >= 0;
 
-function sensorGuard(pin, oNum, waitSec, asserted, msgId) {
+// `retreat` is optional: { safeZ, returnZ }. When given, a fault lifts the
+// spindle clear of the rack before the operator is asked to do anything, and
+// drops back down once they continue. Both moves live INSIDE the if-block, so
+// a check that passes emits neither and the happy path is byte-for-byte what
+// it was.
+//
+// The descent is not optional decoration. Continue resumes at the line after
+// M0, and the rest of the sequence assumes the spindle is still where the
+// check found it — on a fork load the very next move is the slide-out, which
+// 100 mm too high would leave the tool in the rack. So whatever the lift
+// raises, the return puts back.
+//
+// The lift is deliberately Z-only, straight up over the slot the tool is in.
+// A lateral retreat is the tempting version and the dangerous one: the faults
+// where the operator most wants their hands free are exactly the ones where
+// we do not know the tool is held, and traversing with a loose tool throws
+// it. Straight up means anything that comes free lands in or beside its own
+// slot. The return is fed at drawbar speed rather than rapided because it can
+// be descending onto a holder.
+function sensorGuard(pin, oNum, waitSec, asserted, msgId, retreat) {
+  const lift = retreat ? `G53 G0 Z${retreat.safeZ}` : '';
+  const back = retreat ? `G53 G1 Z${retreat.returnZ} F${DRAWBAR_FEEDRATE_MMPM}` : '';
   return `
     M66 P${pin} ${asserted ? 'L4' : 'L3'} Q${waitSec}
     o${oNum} if [#5399 EQ -1]
+      ${lift}
       (MSG, PLUGIN_PNEUMATICATC:${msgId})
       M0
+      ${back}
     o${oNum} endif
   `.trim();
 }
 
 // expect: 'open' after an unclamp, 'closed' after a clamp.
-function drawbarGuard(settings, oNum, expect) {
+function drawbarGuard(settings, oNum, expect, retreat) {
   if (!auxInputConfigured(settings.drawbarInput)) return '';
   const open = expect === 'open';
   return sensorGuard(
     settings.drawbarInput, oNum, DRAWBAR_WAIT_SEC, open,
-    open ? 'DRAWBAR_FAILED_TO_OPEN' : 'DRAWBAR_FAILED_TO_CLOSE'
+    open ? 'DRAWBAR_FAILED_TO_OPEN' : 'DRAWBAR_FAILED_TO_CLOSE',
+    retreat
   );
 }
 
 // expect: 'present' when a tool should now be gripped, 'empty' when the
 // spindle should be clear.
-function toolGuard(settings, oNum, expect) {
+function toolGuard(settings, oNum, expect, retreat) {
   if (!auxInputConfigured(settings.toolSensorInput)) return '';
   const present = expect === 'present';
   return sensorGuard(
     settings.toolSensorInput, oNum, TOOL_SENSE_WAIT_SEC, present,
-    present ? 'TOOL_FAILED_TO_SEAT' : 'TOOL_STILL_GRIPPED'
+    present ? 'TOOL_FAILED_TO_SEAT' : 'TOOL_STILL_GRIPPED',
+    retreat
   );
 }
 
@@ -1235,7 +1260,7 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
       G4 P0.5
-      ${drawbarGuard(settings, 200, 'open')}${closeAfterLiftOff}
+      ${drawbarGuard(settings, 200, 'open', { safeZ: settings.zSafe, returnZ: settings.slot1.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
       G53 G0 Z${settings.zSafe}
       ${toolGuard(settings, 201, 'empty')}
       M61 Q0
@@ -1250,7 +1275,7 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
     G4 P0.5
     ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
     G4 P0.5
-    ${drawbarGuard(settings, 200, 'open')}${closeAfterLiftOff}
+    ${drawbarGuard(settings, 200, 'open', { safeZ: settings.zSafe, returnZ: settings.slot1.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
     G53 G0 Z${settings.zSafe}
     ${toolGuard(settings, 201, 'empty')}
     M61 Q0
@@ -1337,7 +1362,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       G4 P0.1
       ${auxLineFor(settings, 'unclamp')}
       G4 P${DEDUST_VENT_SEC}
-      ${drawbarGuard(settings, 210, 'open')}
+      ${drawbarGuard(settings, 210, 'open', { safeZ: settings.zSafe, returnZ: settings.slot1.z + DEDUST_LIFT_MM })}
       G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
       G53 G0 Z${approachZ}`;
   const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
@@ -1348,8 +1373,8 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       G4 P0.5
       ${auxLineFor(settings, 'clamp')}${drawbarSeat}
       G4 P${clampSettle}
-      ${drawbarGuard(settings, 211, 'closed')}
-      ${toolGuard(settings, 212, 'present')}
+      ${drawbarGuard(settings, 211, 'closed', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
+      ${toolGuard(settings, 212, 'present', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
       G53 G0 Z${settings.zSafe}
       M61 Q${toolNumber}
       ${tlsRoutine}
@@ -1362,8 +1387,8 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
     G4 P0.5
     ${auxLineFor(settings, 'clamp')}${drawbarSeat}
     G4 P${clampSettle}
-    ${drawbarGuard(settings, 211, 'closed')}
-    ${toolGuard(settings, 212, 'present')}
+    ${drawbarGuard(settings, 211, 'closed', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
+    ${toolGuard(settings, 212, 'present', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
     G53 G1 X${slotPos.approach.x} Y${slotPos.approach.y} F${feed}
     G53 G0 Z${settings.zSafe}
     M61 Q${toolNumber}
@@ -1472,7 +1497,7 @@ function buildProbeUnload(settings, from) {
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
       G4 P0.5
-      ${drawbarGuard(settings, 220, 'open')}${closeAfterLiftOff}
+      ${drawbarGuard(settings, 220, 'open', { safeZ: settings.zSafe, returnZ: h.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
       G53 G0 Z${settings.zSafe}
       ${toolGuard(settings, 221, 'empty')}
       M61 Q0
@@ -1488,7 +1513,7 @@ function buildProbeUnload(settings, from) {
     G4 P0.5
     ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
     G4 P0.5
-    ${drawbarGuard(settings, 220, 'open')}${closeAfterLiftOff}
+    ${drawbarGuard(settings, 220, 'open', { safeZ: settings.zSafe, returnZ: h.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
     G53 G0 Z${settings.zSafe}
     ${toolGuard(settings, 221, 'empty')}
     M61 Q0
@@ -1516,7 +1541,7 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
       G4 P0.1
       ${auxLineFor(settings, 'unclamp')}
       G4 P${DEDUST_VENT_SEC}
-      ${drawbarGuard(settings, 230, 'open')}
+      ${drawbarGuard(settings, 230, 'open', { safeZ: settings.zSafe, returnZ: h.z + DEDUST_LIFT_MM })}
       G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
       G53 G0 Z${approachZ}`;
   const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
@@ -1537,8 +1562,8 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
       G4 P0.5
       ${auxLineFor(settings, 'clamp')}${drawbarSeat}
       G4 P${clampSettle}
-      ${drawbarGuard(settings, 231, 'closed')}
-      ${toolGuard(settings, 232, 'present')}
+      ${drawbarGuard(settings, 231, 'closed', { safeZ: settings.zSafe, returnZ: h.z })}
+      ${toolGuard(settings, 232, 'present', { safeZ: settings.zSafe, returnZ: h.z })}
       M61 Q${toolNumber}
       ${verify}
       G53 G0 Z${settings.zSafe}
@@ -1554,8 +1579,8 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
     G4 P0.5
     ${auxLineFor(settings, 'clamp')}${drawbarSeat}
     G4 P${clampSettle}
-    ${drawbarGuard(settings, 231, 'closed')}
-    ${toolGuard(settings, 232, 'present')}
+    ${drawbarGuard(settings, 231, 'closed', { safeZ: settings.zSafe, returnZ: h.z })}
+    ${toolGuard(settings, 232, 'present', { safeZ: settings.zSafe, returnZ: h.z })}
     G53 G1 X${h.approach.x} Y${h.approach.y} F${feed}
     M61 Q${toolNumber}
     ${verify}

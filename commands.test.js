@@ -2335,3 +2335,75 @@ describe('sensor guards — drawbar and tool-in-spindle', () => {
       `o-word labels must not repeat within one program — got ${opens.join(', ')}`);
   });
 });
+
+// === Fault retreat ======================================================
+//
+// A fault lifts clear of the rack so the operator can work, and drops back
+// before the sequence carries on. Both moves must live inside the if-block:
+// on the happy path neither may be emitted, and after Continue the spindle
+// has to be back where the remaining g-code assumes it is.
+describe('sensor guards — retreat to Z-safe on a fault', () => {
+  const cfg = (extra) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+    clampAuxOutput: 1, rackHolding: 'Fork', drawbarInput: 3, toolSensorInput: 5, ...extra
+  });
+  const lines = (g) => g.split('\n').map((l) => l.trim()).filter(Boolean);
+  // the lines between `oN if` and `oN endif`
+  const block = (ls, n) => {
+    const a = ls.findIndex((l) => l === `o${n} if [#5399 EQ -1]`);
+    const b = ls.findIndex((l) => l === `o${n} endif`);
+    assert.ok(a >= 0 && b > a, `block o${n} not found`);
+    return ls.slice(a + 1, b);
+  };
+
+  test('load: lift precedes the dialog, descent follows the M0, both inside the block', () => {
+    const s = cfg();
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    for (const n of [211, 212]) {
+      const b = block(ls, n);
+      assert.equal(b[0], 'G53 G0 Z0', `o${n}: must lift to Z-safe first`);
+      assert.match(b[1], /^\(MSG, PLUGIN_PNEUMATICATC:/, `o${n}: dialog after the lift`);
+      assert.equal(b[2], 'M0', `o${n}: pause after the dialog`);
+      assert.equal(b[3], 'G53 G1 Z-100 F300', `o${n}: must return to the slot Z it checked at`);
+      assert.equal(b.length, 4, `o${n}: nothing else in the block`);
+    }
+  });
+
+  test('the fork slide-out still comes after the return, not after the lift', () => {
+    const s = cfg();
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const endif = ls.lastIndexOf('o212 endif');
+    const slide = ls.findIndex((l) => /^G53 G1 X-75 Y-40 F/.test(l));
+    assert.ok(slide > endif,
+      'resuming must descend back to slot Z before sliding out, or the tool is left in the rack');
+  });
+
+  test('a check already taken at Z-safe does not lift or descend', () => {
+    const s = cfg();
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const b = block(ls, 210);   // the release before descending onto the shank
+    assert.deepEqual(b, ['(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_OPEN)', 'M0'],
+      'no retreat is needed where the spindle is already clear');
+  });
+
+  test('unload: lifts from the drawbar-offset height and returns to it', () => {
+    const s = cfg();
+    const ls = lines(buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }));
+    const b = block(ls, 200);
+    assert.equal(b[0], 'G53 G0 Z0');
+    assert.equal(b[3], 'G53 G1 Z-99 F300', 'returns to slot.z + drawbar offset, where the check was taken');
+    const empty = block(ls, 201);   // taken after the lift, so already clear
+    assert.deepEqual(empty, ['(MSG, PLUGIN_PNEUMATICATC:TOOL_STILL_GRIPPED)', 'M0']);
+  });
+
+  test('the retreat never reaches a machine with no sensors wired', () => {
+    const s = buildInitialConfig({
+      slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+      clampAuxOutput: 1, rackHolding: 'Fork'
+    });
+    const g = buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false)
+      + buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 });
+    assert.doesNotMatch(g, /o2\d\d/);
+    assert.doesNotMatch(g, /M0/);
+  });
+});
