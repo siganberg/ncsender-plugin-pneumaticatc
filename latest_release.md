@@ -1,4 +1,4 @@
 ## What's Changed
 
-### ✨ New Features
-- The plugin now reads the drawbar and tool-in-spindle sensors, so you can see whether the drawbar is engaged and whether a tool is currently loaded in the spindle
+### 🔧 Improvements
+- When a sensor check fails during a tool change, the spindle now lifts clear of the tool rack instead of stopping in place
