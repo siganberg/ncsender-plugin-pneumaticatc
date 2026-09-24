@@ -533,9 +533,6 @@
     pointer-events: none;
     filter: saturate(0.7);
   }
-  .pa-card.pa-advanced-preview { opacity: 0.7; }
-  .pa-card.pa-advanced-preview .pa-input,
-  .pa-card.pa-advanced-preview .pa-select { cursor: not-allowed; }
 
   .pa-form-row {
     display: flex;
@@ -1769,8 +1766,8 @@
             <path d="M12 16h.01"/>
           </svg>
           <div>
-            <strong>Air Pressure is live. The tool sensors are still a preview.</strong>
-            The pressure input is read with <code>M66</code> once, before the tool change starts — a fault pauses the job with a dialog instead of moving on. Tool Sensor and Tool Holder are recorded here but nothing reads them yet.
+            <strong>Every check here is optional.</strong>
+            Leave a pin on <em>N/A</em> and that check is not added to the tool change at all — a machine with no sensors wired runs exactly as it did before. Inputs are read with <code>M66</code> and are <b>asserted when LOW</b> (the convention Sienci's macros assume); invert the port with <code>$370</code> if yours reads the other way round. Any fault stops the program with a dialog.
           </div>
         </div>
 
@@ -1812,28 +1809,28 @@
           </div>
         </div>
 
-        <div class="pa-card pa-advanced-preview" id="pa-adv-sensors">
-          <h3 class="pa-card-title">Tool Sensors<sup class="pa-title-sup">Coming soon</sup></h3>
+        <div class="pa-card" id="pa-adv-sensors">
+          <h3 class="pa-card-title">Tool Sensors</h3>
           <p class="pa-card-help">
-            Inputs the tool-change sequence will read once these checks ship. Nothing reads them yet — the pins are recorded now so the wiring can be set up ahead of time.
+            Checks the tool change runs against the machine itself. Leave a pin on <em>N/A</em> and that check is simply not made — nothing is armed until you pick a pin. Each fault stops the program with a dialog; the sensor is not read again when you continue.
           </p>
 
           <div class="pa-form-row">
-            <label class="pa-form-label" for="pa-adv-input-tool">
-              Tool Sensor
-              <span class="pa-help-tip" title="Reports drawbar / tool state at the spindle. On the Sienci kit this is the spindle proximity sensor, aux input P0.">?</span>
+            <label class="pa-form-label" for="pa-adv-input-drawbar">
+              Drawbar Sensor
+              <span class="pa-help-tip" title="Switch on the drawbar cylinder that reports when the drawbar is open. Checked after every release (it must open) and after every clamp (it must close), so a drawbar that never moved is caught before the spindle lifts or slides. This is also what catches a loss of air if you have no pressure switch.">?</span>
             </label>
-            <select id="pa-adv-input-tool" class="pa-select pa-adv-pin" disabled>
+            <select id="pa-adv-input-drawbar" class="pa-select pa-adv-pin">
               <option value="">N/A</option>
             </select>
           </div>
 
           <div class="pa-form-row">
-            <label class="pa-form-label" for="pa-adv-input-holder">
-              Tool Holder
-              <span class="pa-help-tip" title="Detects the tip of the ISO20 holder in a rack slot, so the sequence can tell an occupied slot from an empty one before putting a tool away. Sienci ties this to the same pin as the tool sensor and reads it during a slow descent over the slot.">?</span>
+            <label class="pa-form-label" for="pa-adv-input-toolsense">
+              Tool Sensor
+              <span class="pa-help-tip" title="Senses a tool held in the spindle (pull stud / spindle proximity). Checked after a pickup, where a tool must be present, and after a drop-off, where the spindle must be empty. Must be its own input — if you point this at the drawbar switch the readings will be wrong.">?</span>
             </label>
-            <select id="pa-adv-input-holder" class="pa-select pa-adv-pin" disabled>
+            <select id="pa-adv-input-toolsense" class="pa-select pa-adv-pin">
               <option value="">N/A</option>
             </select>
           </div>
@@ -2021,7 +2018,7 @@
   var AUX_INPUT_FALLBACK = 8;
   var auxInputCount = null;
   var auxOutputCount = null;
-  var PIN_SELECT_IDS = ['pa-adv-input-pres', 'pa-adv-input-tool', 'pa-adv-input-holder'];
+  var PIN_SELECT_IDS = ['pa-adv-input-pres', 'pa-adv-input-drawbar', 'pa-adv-input-toolsense'];
 
   function pinOptionExists(sel, value) {
     return qsa('option', sel).some(function(o) { return o.value === String(value); });
@@ -2114,7 +2111,7 @@
     // No pressure pin by default: a fresh install must not arm a safety check
     // against a sensor that may not exist, or every tool change stops at a
     // dialog the operator never asked for. Pick the pin to turn it on.
-    generic: { clampOut: null, pres: '', tool: 0, holder: 0, locked: false, taperBlow: false },
+    generic: { clampOut: null, pres: '', drawbar: '', toolSense: '', locked: false, taperBlow: false },
     // Sienci ATC, from their P200.macro:
     //   _tc_output_db  = 1  (drawbar solenoid — our clamp aux output)
     //   _tc_input_db   = 0  (drawbar sensor)
@@ -2122,9 +2119,20 @@
     //                                   descent over the slot to tell an
     //                                   occupied slot from an empty one)
     //   _tc_input_pres = 2  (air pressure)
+    // The tool-in-spindle sensor is a SEPARATE input, not the drawbar one.
+    // Confirmed against Sienci's own ATC plugin (Sienci-Labs/sienci-atci-plugin),
+    // which is the authority here:
+    //   AUXINPUT0  drawbar   — "detects drawbar position"   (ATCI code B, Drawbar Open)
+    //   AUXINPUT1  tool      — "detects if a tool is in the collet" (ATCI code L, Tool Loaded)
+    //   AUXINPUT2  pressure  — air pressure                 (ATCI code P)
+    //   AUXINPUT7  rack      — rack physically mounted      (ATCI code I)
+    // Do not confuse _tc_input_th with this: _tc_input_th is the tool HOLDER /
+    // rack-slot occupancy sensor and does share pin 0, which is why the note
+    // above says "same pin". Tool-in-spindle is P1 and stands on its own.
+    // Rack presence (P7) is not read yet — see PLAN-sienci-safety-inputs.md.
     // Fixed wiring on a known kit, so the fields are shown read-only.
     sienci: {
-      clampOut: '1', pres: 2, tool: 0, holder: 0, locked: true,
+      clampOut: '1', pres: 2, drawbar: 0, toolSense: 1, locked: true,
       // The kit's taper-blow port is teed off the drawbar valve, so the
       // blow-aware sequence is the right one and stays on.
       taperBlow: true,
@@ -2159,8 +2167,8 @@
       names: {
         'pa-clamp-aux': 'Drawbar',
         'pa-adv-input-pres': 'Pressure',
-        'pa-adv-input-tool': 'Drawbar',
-        'pa-adv-input-holder': 'Tool holder'
+        'pa-adv-input-drawbar': 'Drawbar',
+        'pa-adv-input-toolsense': 'Tool sensor'
       }
     }
   };
@@ -2182,8 +2190,11 @@
     var seedPins = fromUser || p.locked;
     if (seedPins) {
       setPressurePin(p.pres);
-      setAdvPin('pa-adv-input-tool', p.tool);
-      setAdvPin('pa-adv-input-holder', p.holder);
+      setAdvPin('pa-adv-input-drawbar', p.drawbar);
+      // Deliberately not seeded from the profile: see the `toolSense` note on
+      // the Sienci kit below. A tool-in-spindle check has to be pointed at a
+      // real tool sensor by whoever wired one.
+      setAdvPin('pa-adv-input-toolsense', p.toolSense);
       if (p.clampOut !== null) setClampAux(p.clampOut);
       if (typeof p.taperBlow === 'boolean') $('pa-adv-taper-blow').checked = p.taperBlow;
     }
@@ -2199,14 +2210,11 @@
       var wrap = tb.closest('.pa-toggle');
       if (wrap) wrap.classList.toggle('pa-locked', locked);
     })();
-    ['pa-adv-input-pres', 'pa-adv-input-tool', 'pa-adv-input-holder', 'pa-clamp-aux']
+    ['pa-adv-input-pres', 'pa-adv-input-drawbar', 'pa-adv-input-toolsense', 'pa-clamp-aux']
       .forEach(function(id) {
         var el = $(id);
         if (!el) return;
-        // Tool Sensor / Tool Holder aren't implemented yet, so they stay
-        // disabled regardless; the profile only decides the other two.
-        var previewOnly = (id === 'pa-adv-input-tool' || id === 'pa-adv-input-holder');
-        el.disabled = locked || previewOnly;
+        el.disabled = locked;
         el.classList.toggle('pa-locked', locked);
         showPinAsLabel(id, locked, (p.names || {})[id], !!p.suppressMissingWarning);
       });
@@ -2975,6 +2983,10 @@
     // Air-pressure sensor input (-1 / missing = no sensor = blank field).
     var savedPres = initialConfig.pressureInput;
     setPressurePin((typeof savedPres === 'number' && savedPres >= 0) ? savedPres : '');
+    var savedDrawbar = initialConfig.drawbarInput;
+    setPinValue('pa-adv-input-drawbar', (typeof savedDrawbar === 'number' && savedDrawbar >= 0) ? savedDrawbar : '');
+    var savedToolSense = initialConfig.toolSensorInput;
+    setPinValue('pa-adv-input-toolsense', (typeof savedToolSense === 'number' && savedToolSense >= 0) ? savedToolSense : '');
     $('pa-adv-taper-blow').checked = !!initialConfig.taperBlow;
 
     // Profile last, so it can lock/overwrite the pin fields it owns. Silent:
@@ -3166,6 +3178,16 @@
       // switches every pressure check off in the generated macro.
       pressureInput: (function() {
         var sel = $('pa-adv-input-pres');
+        var n = Number.parseInt(sel ? sel.value : '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : -1;
+      })(),
+      drawbarInput: (function() {
+        var sel = $('pa-adv-input-drawbar');
+        var n = Number.parseInt(sel ? sel.value : '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : -1;
+      })(),
+      toolSensorInput: (function() {
+        var sel = $('pa-adv-input-toolsense');
         var n = Number.parseInt(sel ? sel.value : '', 10);
         return Number.isFinite(n) && n >= 0 ? n : -1;
       })(),

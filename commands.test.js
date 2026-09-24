@@ -1797,8 +1797,11 @@ describe('taperBlow — Sienci-style drawbar handling around the traverse', () =
   });
 
   test('on: the load re-opens above the holder, vents 0.8 s, feeds down at 1500 and settles 1 s after clamping', () => {
+    // Blank lines are dropped before the program reaches the controller
+    // (a disabled sensor guard interpolates to ''), so drop them here too —
+    // this test is about which real lines sit next to each other.
     const lines = buildLoadTool(on, 2, calculateSlotPosition(on, 2), '', /* alreadyReleased */ false, { x: 0, y: 0 }, /* chained */ true)
-      .split('\n').map((l) => l.trim());
+      .split('\n').map((l) => l.trim()).filter((l) => l !== '');
     const i = lines.findIndex((l) => l === 'G53 G0 Z-80');
     assert.ok(i > 0, 'expected a rapid to slot Z + 20 above the holder');
     assert.equal(lines[i + 1], 'G4 P0.1');
@@ -2220,5 +2223,115 @@ describe('final exit leg is left for the core keepout check', () => {
     const lines = commands.map((c) => c.command.trim());
     assert.ok(!lines.some((l) => l.includes('$keepout_off')));
     assert.ok(!lines.some((l) => l.includes('ncs-checked')));
+  });
+});
+
+// === Drawbar + tool-in-spindle sensor guards =============================
+//
+// Both are off unless a pin is configured, and when on they must land in the
+// one ordering that makes them worth having: every check sits BEFORE the move
+// that would depend on it. The fork slide-out is the sharp case — sliding
+// sideways with a tool the drawbar never gripped drags it out of the fork.
+describe('sensor guards — drawbar and tool-in-spindle', () => {
+  const sensed = (extra) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80,
+    clampAuxOutput: 1, rackHolding: 'Fork', ...extra
+  });
+  const lines = (g) => g.split('\n').map((l) => l.trim()).filter(Boolean);
+  const idx = (ls, re) => ls.findIndex((l) => re.test(l));
+
+  test('no pins configured: not a single M66 and no sensor dialog', () => {
+    const s = sensed({});
+    assert.equal(s.drawbarInput, -1);
+    assert.equal(s.toolSensorInput, -1);
+    for (const g of [
+      buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }),
+      buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false)
+    ]) {
+      assert.doesNotMatch(g, /M66/);
+      assert.doesNotMatch(g, /DRAWBAR_FAILED|TOOL_FAILED_TO_SEAT|TOOL_STILL_GRIPPED/);
+    }
+  });
+
+  // An unsanitized settings object (old stored config, or a raw test fixture)
+  // leaves these undefined. `undefined < 0` is false, so a naive check would
+  // emit `M66 Pundefined` into a live tool change.
+  test('undefined pins are treated as absent, never emitted as a pin number', () => {
+    const raw = { ...sensed({}) };
+    delete raw.drawbarInput;
+    delete raw.toolSensorInput;
+    const g = buildUnloadTool(raw, 1, calculateSlotPosition(raw, 1), { x: 0, y: 0 });
+    assert.doesNotMatch(g, /undefined/);
+    assert.doesNotMatch(g, /M66/);
+  });
+
+  test('unload: drawbar must read open after the release, spindle empty after the lift', () => {
+    const s = sensed({ drawbarInput: 3, toolSensorInput: 5 });
+    const ls = lines(buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }));
+    const release = idx(ls, /^M64 P1$/);
+    const dbRead  = idx(ls, /^M66 P3 L4 Q/);
+    const lift    = idx(ls, /^G53 G0 Z0$/);
+    const tisRead = idx(ls, /^M66 P5 L3 Q/);
+    const m61     = idx(ls, /^M61 Q0$/);
+    assert.ok(release >= 0 && dbRead > release, 'drawbar read comes after the release');
+    assert.ok(lift > dbRead, 'the spindle only lifts once the drawbar reads open');
+    assert.ok(tisRead > lift, '"spindle empty" is only a settled question after the lift');
+    assert.ok(m61 > tisRead, 'the controller is told T0 after the checks');
+    assert.match(ls[dbRead + 1], /^o\d+ if \[#5399 EQ -1\]$/);
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_OPEN)'));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_STILL_GRIPPED)'));
+  });
+
+  test('load: both checks land before the fork slide-out, not after it', () => {
+    const s = sensed({ drawbarInput: 3, toolSensorInput: 5 });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const clamp   = idx(ls, /^M65 P1$/);
+    const dbClose = idx(ls, /^M66 P3 L3 Q/);
+    const tisRead = idx(ls, /^M66 P5 L4 Q/);
+    const slideOut = idx(ls, /^G53 G1 X-75 Y-40 F/);
+    assert.ok(clamp >= 0 && dbClose > clamp, 'drawbar-closed read follows the clamp');
+    assert.ok(tisRead > dbClose, 'tool presence is checked after the drawbar closed');
+    assert.ok(slideOut > tisRead,
+      `the fork slide-out must come after both checks — got slideOut=${slideOut}, tisRead=${tisRead}`);
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_CLOSE)'));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT)'));
+  });
+
+  test('load from empty also verifies the release before descending onto the shank', () => {
+    const s = sensed({ drawbarInput: 3 });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const open = idx(ls, /^M66 P3 L4 Q/);
+    const descend = idx(ls, /^G53 G0 Z-99$/);
+    assert.ok(open >= 0 && descend > open,
+      'the drawbar-open check must precede the descent onto the shank');
+  });
+
+  test('a chained load does not re-verify a release the unload already checked', () => {
+    const s = sensed({ drawbarInput: 3 });
+    const g = buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', /* alreadyReleased */ true, { x: 0, y: 0 }, true);
+    assert.doesNotMatch(g, /M66 P3 L4 Q/);      // no "must be open" read
+    assert.match(g, /M66 P3 L3 Q/);             // still checks it closed after the clamp
+  });
+
+  test('each guard is independent: one pin on, the other silent', () => {
+    const dbOnly = sensed({ drawbarInput: 3 });
+    const gd = buildUnloadTool(dbOnly, 1, calculateSlotPosition(dbOnly, 1), { x: 0, y: 0 });
+    assert.match(gd, /DRAWBAR_FAILED_TO_OPEN/);
+    assert.doesNotMatch(gd, /TOOL_STILL_GRIPPED/);
+
+    const tisOnly = sensed({ toolSensorInput: 5 });
+    const gt = buildUnloadTool(tisOnly, 1, calculateSlotPosition(tisOnly, 1), { x: 0, y: 0 });
+    assert.match(gt, /TOOL_STILL_GRIPPED/);
+    assert.doesNotMatch(gt, /DRAWBAR_FAILED_TO_OPEN/);
+  });
+
+  test('o-word labels are unique across a full swap program', () => {
+    const s = sensed({ drawbarInput: 3, toolSensorInput: 5, pressureInput: 2 });
+    const prog = buildToolChangeProgram(s, 1, 2, { x: 0, y: 0 }, 0, { x: 0, y: 0 });
+    const g = (Array.isArray(prog) ? prog.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')).join('\n') : String(prog));
+    const opens = (g.match(/^\s*o\d+ if /gm) || []).map((l) => l.trim().split(' ')[0]);
+    assert.ok(opens.length > 0, 'expected guards in a swap program');
+    assert.equal(new Set(opens).size, opens.length,
+      `o-word labels must not repeat within one program — got ${opens.join(', ')}`);
   });
 });
