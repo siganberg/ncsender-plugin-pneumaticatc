@@ -1,4 +1,4 @@
 ## What's Changed
 
-### 🐛 Bug Fixes
-- Fixed the final-leg check so it now runs at the correct point during operation
+### ✨ New Features
+- The plugin now reads the drawbar and tool-in-spindle sensors, so you can see whether the drawbar is engaged and whether a tool is currently loaded in the spindle
