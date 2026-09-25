@@ -1,4 +1,4 @@
 ## What's Changed
 
-### 🔧 Improvements
-- When a sensor check fails during a tool change, the spindle now lifts clear of the tool rack instead of stopping in place
+### 🐛 Bug Fixes
+- Fixed an issue where g-code run from a Stop event could leave modal settings behind that carried over into the job
