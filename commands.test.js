@@ -2407,3 +2407,58 @@ describe('sensor guards — retreat to Z-safe on a fault', () => {
     assert.doesNotMatch(g, /M0/);
   });
 });
+
+// === Event g-code modal containment ====================================
+//
+// Pre/Post Tool Change snippets run in the PROGRAM's units by design -- they
+// sit outside the G21 wrapper that makes the plugin's own mm config correct.
+// What must not happen is a modal word in the snippet surviving into the rest
+// of the job: a G21 written "to be safe" on an inch program would put every
+// remaining line in millimetres, silently.
+describe('event g-code cannot leak modal state into the job', () => {
+  const withEvents = (pre, post) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80,
+    clampAuxOutput: 1, rackHolding: 'Fork',
+    preToolChangeGcode: pre, postToolChangeGcode: post
+  });
+  const program = (s) => {
+    const r = buildToolChangeProgram(s, 1, 2, { x: 0, y: 0 }, 0, { x: 0, y: 0 });
+    return (Array.isArray(r) ? r.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')) : [String(r)])
+      .join('\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  };
+
+  test('a post event is bracketed by a units and distance-mode restore', () => {
+    const ls = program(withEvents('', 'G21\nG91\nG0 Z-5'));
+    const capU = ls.indexOf('#<post_units> = [20 + #<_metric>]');
+    const capD = ls.indexOf('#<post_dist> = [91 - #<_absolute>]');
+    const body = ls.indexOf('G0 Z-5');
+    const relU = ls.indexOf('G[#<post_units>]');
+    const relD = ls.indexOf('G[#<post_dist>]');
+    assert.ok(capU >= 0 && capD > capU, 'both modes captured before the snippet');
+    assert.ok(body > capD, 'snippet runs after the capture');
+    assert.ok(relU > body && relD > relU, 'both restored after the snippet');
+  });
+
+  test('a pre event gets its own bracket, independent of the post one', () => {
+    const ls = program(withEvents('G20', 'G91'));
+    assert.ok(ls.includes('#<pre_units> = [20 + #<_metric>]'));
+    assert.ok(ls.includes('G[#<pre_dist>]'));
+    assert.ok(ls.includes('#<post_units> = [20 + #<_metric>]'));
+    assert.ok(ls.includes('G[#<post_dist>]'));
+    assert.ok(ls.indexOf('G[#<pre_units>]') < ls.indexOf('#<post_units> = [20 + #<_metric>]'),
+      'the pre bracket closes before the post one opens');
+  });
+
+  test('no event configured emits no bracket at all', () => {
+    const g = program(withEvents('', '')).join('\n');
+    assert.doesNotMatch(g, /pre_units|post_units|pre_dist|post_dist/);
+  });
+
+  // The plugin's own moves stay metric regardless -- that wrapper is what
+  // makes its millimetre config mean what it says.
+  test('the plugin still forces G21 for its own moves and restores after', () => {
+    const g = program(withEvents('', 'G0 Z-5')).join('\n');
+    assert.match(g, /#<return_units> = \[20 \+ #<_metric>\]/);
+    assert.match(g, /G\[#<return_units>\]/);
+  });
+});
