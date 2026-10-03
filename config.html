@@ -338,6 +338,13 @@
     color: var(--color-text-primary);
     margin: 0;
   }
+  .pa-field-note {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    color: var(--color-text-secondary);
+  }
   .pa-card-help {
     margin: 0;
     font-size: 0.95rem;
@@ -526,9 +533,6 @@
     pointer-events: none;
     filter: saturate(0.7);
   }
-  .pa-card.pa-advanced-preview { opacity: 0.7; }
-  .pa-card.pa-advanced-preview .pa-input,
-  .pa-card.pa-advanced-preview .pa-select { cursor: not-allowed; }
 
   .pa-form-row {
     display: flex;
@@ -1134,6 +1138,19 @@
           <span class="pa-nav-label">TLS</span>
           <span class="pa-tab-caret" aria-hidden="true"></span>
         </button>
+        <button type="button" class="pa-nav-btn" data-nav="probe">
+          <span class="pa-nav-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="7"/>
+              <line x1="12" y1="1" x2="12" y2="5"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="1" y1="12" x2="5" y2="12"/>
+              <line x1="19" y1="12" x2="23" y2="12"/>
+            </svg>
+          </span>
+          <span class="pa-nav-label">Probe</span>
+          <span class="pa-tab-caret" aria-hidden="true"></span>
+        </button>
         <button type="button" class="pa-nav-btn" data-nav="manual">
           <span class="pa-nav-icon">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1458,13 +1475,157 @@
             </div>
           </div>
           <p class="pa-card-help" style="margin-top: 8px;">Absolute machine Z where the seek begins after the XY move to the toolsetter. Values closer to the toolsetter shorten travel on tall gantries; keep it clear of the tallest tool. The tool library's TLS Z offset is added on top of this for the specific tool being probed.</p>
+        </div>
+      </div>
 
-          <div class="pa-field-inline" style="margin-top: 12px;">
-            <label>Perform TLS after first <code>$H</code></label>
+      <footer class="pa-panel-footer">
+        <button type="button" class="pa-save-btn" data-save>Save</button>
+      </footer>
+    </section>
+
+    <!-- ===================== PROBE ===================== -->
+    <section class="pa-content" data-view="probe">
+      <header class="pa-panel-header">
+        <h2 class="pa-panel-title">Probe</h2>
+        <div class="pa-header-cards">
+          <div class="pa-header-card">
+            <div class="pa-mcoord">
+              <div class="pa-mcoord-title">Machine Coordinates</div>
+              <div class="pa-mcoord-row">
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">X</span><span class="pa-mcoord-value pa-axis-x">0.000</span></div>
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">Y</span><span class="pa-mcoord-value pa-axis-y">0.000</span></div>
+                <div class="pa-mcoord-cell"><span class="pa-mcoord-axis">Z</span><span class="pa-mcoord-value pa-axis-z">0.000</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="pa-header-card">
+            <div class="pa-jog-controls">
+              <nc-step-control></nc-step-control>
+              <nc-jog-control></nc-jog-control>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="pa-panel">
+        <div class="pa-card">
+          <h3 class="pa-card-title">Probe Auto-Loader</h3>
+          <p class="pa-card-help">Treats the probe as just another tool: calling its tool number picks it up from its own holder the same way a rack slot would, instead of prompting for a hand swap.</p>
+          <div class="pa-field-inline">
+            <label for="pa-probe-enabled">Enable Probe Auto-Loader</label>
             <label class="pa-toggle">
-              <input type="checkbox" id="pa-perform-tls-after-home">
+              <input type="checkbox" id="pa-probe-enabled">
               <span class="pa-toggle-slider"></span>
             </label>
+          </div>
+        </div>
+
+        <div class="pa-card" id="pa-probe-settings">
+          <h3 class="pa-card-title">Probe Tool</h3>
+          <p class="pa-card-help" id="pa-probe-tool-help">The tool number that loads the probe. It has to sit above the rack so it can't collide with a slot number.</p>
+          <div class="pa-row-3">
+            <div class="pa-field">
+              <label for="pa-probe-tool">Tool Number</label>
+              <input class="pa-input" type="number" id="pa-probe-tool" value="99" min="2" max="99" step="1">
+            </div>
+            <div class="pa-field">
+              <label for="pa-probe-holding">Loading Style</label>
+              <select class="pa-select" id="pa-probe-holding">
+                <option value="Fork" selected>Fork</option>
+                <option value="Cup">Cup</option>
+              </select>
+              <span class="pa-field-note">Same fork/cup motion as the rack, but set independently — the probe's holder doesn't have to match it.</span>
+            </div>
+          </div>
+
+          <!-- Fork-only motion params for the probe holder (shown when Loading
+               Style = Fork). Its own set: the rack may be on Cup, or slide the
+               other way, and the holder can sit at any angle to the rack. -->
+          <div id="pa-probe-fork-settings" style="margin-top: 12px;">
+            <div class="pa-field-inline">
+              <label>Slide Axis</label>
+              <div class="pa-segment" id="pa-probe-slide-axis">
+                <button type="button" class="pa-segment-btn active" data-value="X">X</button>
+                <button type="button" class="pa-segment-btn" data-value="Y">Y</button>
+                <div class="pa-segment-indicator"></div>
+              </div>
+            </div>
+            <div class="pa-field-inline">
+              <label>Slide Direction</label>
+              <div class="pa-segment" id="pa-probe-slide-direction">
+                <button type="button" class="pa-segment-btn active" data-value="Negative">−</button>
+                <button type="button" class="pa-segment-btn" data-value="Positive">+</button>
+                <div class="pa-segment-indicator"></div>
+              </div>
+            </div>
+            <div class="pa-field-inline">
+              <label id="pa-label-probe-slide-distance">Slide Distance (mm)</label>
+              <input class="pa-input" type="number" id="pa-probe-slide-distance" value="40" min="0" step="0.1">
+            </div>
+            <div class="pa-field-inline">
+              <label id="pa-label-probe-slide-speed">Slide Speed (mm/min)</label>
+              <input class="pa-input" type="number" id="pa-probe-slide-speed" value="500" min="1" step="1">
+            </div>
+          </div>
+
+          <div style="margin-top: 16px;">
+            <label class="pa-group-label">Probe Position</label>
+            <div class="pa-coord-row">
+              <div class="pa-coord">
+                <span class="pa-coord-label">X</span>
+                <input class="pa-input" type="number" id="pa-probe-x" value="0" step="0.001">
+              </div>
+              <div class="pa-coord">
+                <span class="pa-coord-label">Y</span>
+                <input class="pa-input" type="number" id="pa-probe-y" value="0" step="0.001">
+              </div>
+              <div class="pa-coord">
+                <span class="pa-coord-label">Z</span>
+                <input class="pa-input" type="number" id="pa-probe-z" value="-100" step="0.001">
+              </div>
+              <button type="button" class="pa-btn pa-btn-sm" id="pa-probe-grab">Grab current</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="pa-card pa-events-card" id="pa-probe-verify-card">
+          <h3 class="pa-card-title">Verify Probe Loaded</h3>
+          <p class="pa-card-help">Runs after the probe is picked up and before its TLS, to prove the needle actually triggers. Catching a dead or bent needle here is what stops the machine driving the probe into the toolsetter later.</p>
+          <div class="pa-field-inline">
+            <label for="pa-probe-verify-enabled">Verify probe after pickup</label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-probe-verify-enabled" checked>
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+          <div id="pa-probe-verify-body">
+            <div class="pa-field-inline">
+              <label>Method</label>
+              <div class="pa-segment" id="pa-probe-verify-mode">
+                <button type="button" class="pa-segment-btn active" data-value="simple">Simple</button>
+                <button type="button" class="pa-segment-btn" data-value="advanced">Advanced</button>
+                <div class="pa-segment-indicator"></div>
+              </div>
+            </div>
+
+            <div id="pa-probe-verify-simple">
+              <p class="pa-card-help">Set <strong>Verify Z</strong> to the machine height where the needle tip sits level with the holder's mount. Right after the pickup the plugin rises to that height, goes back over the holder's centre and probes sideways toward the holder's edge (along the slide axis, into the holder) for up to 12&nbsp;mm at 150&nbsp;mm/min. A working needle touches the rim; no touch raises the controller's probe alarm and aborts the tool change. It then returns to the centre, rises to safe Z and carries on to TLS.</p>
+              <div class="pa-field-inline">
+                <label id="pa-label-probe-verify-z">Verify Z (mm)</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input class="pa-input" type="number" id="pa-probe-verify-z" value="-80" step="0.001">
+                  <button type="button" class="pa-btn pa-btn-sm" id="pa-probe-verify-grab">Grab current Z</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="pa-probe-verify-advanced">
+              <p class="pa-card-help">Your own routine, run right after the pickup while the spindle is still at the holder (fork: at the slide-out point, holder Z; cup: over the cup, holder Z). The plugin rises to safe Z afterwards. Switching to Advanced fills the editor with the Simple routine as a starting point; <em>Regenerate</em> rebuilds it from the current Simple settings. Machine coordinates are in mm.</p>
+              <div id="pa-probe-verify-editor" class="pa-monaco"></div>
+              <div style="margin-top: 8px;">
+                <button type="button" class="pa-btn pa-btn-sm" id="pa-probe-verify-regenerate">Regenerate from Simple</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1549,12 +1710,12 @@
       <div class="pa-panel pa-panel-events">
         <div class="pa-card pa-events-card">
           <h3 class="pa-card-title">Pre Tool Change</h3>
-          <p class="pa-card-help">G-code commands executed before each tool change (M6). E.g. turn off coolant, open ATC cover.</p>
+          <p class="pa-card-help">G-code commands executed before each tool change (M6). E.g. turn off coolant, open ATC cover. Runs in the units the program is using (<code>G20</code>/<code>G21</code>), not always millimetres — so put an explicit <code>G20</code> or <code>G21</code> in the snippet if it contains coordinates. Units and distance mode are restored afterwards, so anything modal you set here cannot leak into the rest of the job.</p>
           <div id="pa-pre-editor" class="pa-monaco"></div>
         </div>
         <div class="pa-card pa-events-card">
           <h3 class="pa-card-title">Post Tool Change</h3>
-          <p class="pa-card-help">G-code commands executed after each tool change (M6) completes. E.g. close ATC cover, restore coolant.</p>
+          <p class="pa-card-help">G-code commands executed after each tool change (M6) completes. E.g. close ATC cover, restore coolant. Runs in the units the program is using (<code>G20</code>/<code>G21</code>), not always millimetres — so put an explicit <code>G20</code> or <code>G21</code> in the snippet if it contains coordinates. Units and distance mode are restored afterwards, so anything modal you set here cannot leak into the rest of the job.</p>
           <div id="pa-post-editor" class="pa-monaco"></div>
         </div>
         <div class="pa-card pa-events-card">
@@ -1597,8 +1758,8 @@
             <path d="M12 16h.01"/>
           </svg>
           <div>
-            <strong>Air Pressure is live. The tool sensors are still a preview.</strong>
-            The pressure input is read with <code>M66</code> once, before the tool change starts — a fault pauses the job with a dialog instead of moving on. Tool Sensor and Tool Holder are recorded here but nothing reads them yet.
+            <strong>Every check here is optional.</strong>
+            Leave a pin on <em>N/A</em> and that check is not added to the tool change at all — a machine with no sensors wired runs exactly as it did before. Inputs are read with <code>M66</code> and are <b>asserted when LOW</b> (the convention Sienci's macros assume; the Retractable Tool Rack end-stops are the exception and read OK when HIGH); invert the port with <code>$370</code> if yours reads the other way round. Any fault stops the program with a dialog.
           </div>
         </div>
 
@@ -1640,30 +1801,78 @@
           </div>
         </div>
 
-        <div class="pa-card pa-advanced-preview" id="pa-adv-sensors">
-          <h3 class="pa-card-title">Tool Sensors<sup class="pa-title-sup">Coming soon</sup></h3>
+        <div class="pa-card" id="pa-adv-sensors">
+          <h3 class="pa-card-title">Tool Sensors</h3>
           <p class="pa-card-help">
-            Inputs the tool-change sequence will read once these checks ship. Nothing reads them yet — the pins are recorded now so the wiring can be set up ahead of time.
+            Checks the tool change runs against the machine itself. Leave a pin on <em>N/A</em> and that check is simply not made — nothing is armed until you pick a pin. Each fault stops the program with a dialog; the sensor is not read again when you continue.
           </p>
 
           <div class="pa-form-row">
-            <label class="pa-form-label" for="pa-adv-input-tool">
-              Tool Sensor
-              <span class="pa-help-tip" title="Reports drawbar / tool state at the spindle. On the Sienci kit this is the spindle proximity sensor, aux input P0.">?</span>
+            <label class="pa-form-label" for="pa-adv-input-drawbar">
+              Drawbar Sensor
+              <span class="pa-help-tip" title="Switch on the drawbar cylinder that reports when the drawbar is open. Checked after every release (it must open) and after every clamp (it must close), so a drawbar that never moved is caught before the spindle lifts or slides. This is also what catches a loss of air if you have no pressure switch.">?</span>
             </label>
-            <select id="pa-adv-input-tool" class="pa-select pa-adv-pin" disabled>
+            <select id="pa-adv-input-drawbar" class="pa-select pa-adv-pin">
               <option value="">N/A</option>
             </select>
           </div>
 
           <div class="pa-form-row">
-            <label class="pa-form-label" for="pa-adv-input-holder">
-              Tool Holder
-              <span class="pa-help-tip" title="Detects the tip of the ISO20 holder in a rack slot, so the sequence can tell an occupied slot from an empty one before putting a tool away. Sienci ties this to the same pin as the tool sensor and reads it during a slow descent over the slot.">?</span>
+            <label class="pa-form-label" for="pa-adv-input-toolsense">
+              Tool Sensor
+              <span class="pa-help-tip" title="Senses a tool held in the spindle (pull stud / spindle proximity). Checked after a pickup, where a tool must be present, and after a drop-off, where the spindle must be empty. Must be its own input — if you point this at the drawbar switch the readings will be wrong.">?</span>
             </label>
-            <select id="pa-adv-input-holder" class="pa-select pa-adv-pin" disabled>
+            <select id="pa-adv-input-toolsense" class="pa-select pa-adv-pin">
               <option value="">N/A</option>
             </select>
+          </div>
+        </div>
+
+        <div class="pa-card" id="pa-adv-toolrack-card">
+          <h3 class="pa-card-title">Retractable Tool Rack</h3>
+          <p class="pa-card-help">
+            For a rack mounted on an actuator that extends it into position for a load/unload and retracts it clear for the rest of the job. Switch <em>Moving tool rack</em> on, pick the aux output that drives it, and (optionally) the two aux inputs confirming each end of travel — a separate sensor for available and for unavailable, not one sensor read both ways, so a rack stuck mid-travel is caught instead of read as either end. Unlike the sensors above, both of these read as <b>OK when the input is HIGH</b> — invert the port in firmware (<code>$370</code>) if wired the other way round. Leave it off if your rack doesn't move: nothing changes, and the pins you pick are kept for when you switch it back on.
+          </p>
+
+          <div class="pa-field-inline">
+            <label for="pa-adv-toolrack-enabled">
+              Moving tool rack
+              <span class="pa-help-tip" title="On: the rack is extended before any rack-slot motion and retracted afterwards. Off: the rack is never driven and the pins below are ignored (but remembered).">?</span>
+            </label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-adv-toolrack-enabled">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+
+          <div id="pa-adv-toolrack-fields">
+            <div class="pa-form-row">
+              <label class="pa-form-label" for="pa-adv-toolrack-output">
+                Tool Rack Aux Output
+                <span class="pa-help-tip" title="Drives the rack extend/retract actuator. ON extends it into position, OFF retracts it clear. Required when the rack is switched on.">?</span>
+              </label>
+              <select id="pa-adv-toolrack-output" class="pa-select"></select>
+            </div>
+
+            <div class="pa-form-row">
+              <label class="pa-form-label" for="pa-adv-input-toolrack-available">
+                Rack Available Sensor
+                <span class="pa-help-tip" title="Confirms the rack is extended and available for a load/unload. Checked before approaching any slot.">?</span>
+              </label>
+              <select id="pa-adv-input-toolrack-available" class="pa-select pa-adv-pin">
+                <option value="">N/A</option>
+              </select>
+            </div>
+
+            <div class="pa-form-row">
+              <label class="pa-form-label" for="pa-adv-input-toolrack-unavailable">
+                Rack Unavailable Sensor
+                <span class="pa-help-tip" title="Confirms the rack is retracted clear of the machining envelope. Checked after a tool change finishes.">?</span>
+              </label>
+              <select id="pa-adv-input-toolrack-unavailable" class="pa-select pa-adv-pin">
+                <option value="">N/A</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
@@ -1808,7 +2017,8 @@
     'pa-slide-distance', 'pa-slide-speed', 'pa-keepout-padding', 'pa-slot-distance',
     'pa-seek-start-z', 'pa-seek-distance', 'pa-seek-feedrate',
     'pa-slot1-x', 'pa-slot1-y', 'pa-slot1-z', 'pa-slot1-z-custom',
-    'pa-toolsetter-x', 'pa-toolsetter-y', 'pa-manualtool-x', 'pa-manualtool-y'
+    'pa-toolsetter-x', 'pa-toolsetter-y', 'pa-manualtool-x', 'pa-manualtool-y',
+    'pa-probe-x', 'pa-probe-y', 'pa-probe-z'
   ];
   function relaxUnitInput(el) {
     if (!el || UNITS_PREFERENCE !== 'imperial') return;
@@ -1830,7 +2040,8 @@
       qsa('.pa-content').forEach(function(c) {
         c.classList.toggle('active', c.getAttribute('data-view') === target);
       });
-      if (target === 'events') setTimeout(layoutMonaco, 0);
+      if (target === 'events' || target === 'probe') setTimeout(layoutMonaco, 0);
+      if (target === 'probe') setTimeout(relayoutProbeSegments, 0);
     });
   });
 
@@ -1847,7 +2058,7 @@
   var AUX_INPUT_FALLBACK = 8;
   var auxInputCount = null;
   var auxOutputCount = null;
-  var PIN_SELECT_IDS = ['pa-adv-input-pres', 'pa-adv-input-tool', 'pa-adv-input-holder'];
+  var PIN_SELECT_IDS = ['pa-adv-input-pres', 'pa-adv-input-drawbar', 'pa-adv-input-toolsense', 'pa-adv-input-toolrack-available', 'pa-adv-input-toolrack-unavailable'];
 
   function pinOptionExists(sel, value) {
     return qsa('option', sel).some(function(o) { return o.value === String(value); });
@@ -1940,7 +2151,7 @@
     // No pressure pin by default: a fresh install must not arm a safety check
     // against a sensor that may not exist, or every tool change stops at a
     // dialog the operator never asked for. Pick the pin to turn it on.
-    generic: { clampOut: null, pres: '', tool: 0, holder: 0, locked: false, taperBlow: false },
+    generic: { clampOut: null, pres: '', drawbar: '', toolSense: '', locked: false, taperBlow: false },
     // Sienci ATC, from their P200.macro:
     //   _tc_output_db  = 1  (drawbar solenoid — our clamp aux output)
     //   _tc_input_db   = 0  (drawbar sensor)
@@ -1948,9 +2159,20 @@
     //                                   descent over the slot to tell an
     //                                   occupied slot from an empty one)
     //   _tc_input_pres = 2  (air pressure)
+    // The tool-in-spindle sensor is a SEPARATE input, not the drawbar one.
+    // Confirmed against Sienci's own ATC plugin (Sienci-Labs/sienci-atci-plugin),
+    // which is the authority here:
+    //   AUXINPUT0  drawbar   — "detects drawbar position"   (ATCI code B, Drawbar Open)
+    //   AUXINPUT1  tool      — "detects if a tool is in the collet" (ATCI code L, Tool Loaded)
+    //   AUXINPUT2  pressure  — air pressure                 (ATCI code P)
+    //   AUXINPUT7  rack      — rack physically mounted      (ATCI code I)
+    // Do not confuse _tc_input_th with this: _tc_input_th is the tool HOLDER /
+    // rack-slot occupancy sensor and does share pin 0, which is why the note
+    // above says "same pin". Tool-in-spindle is P1 and stands on its own.
+    // Rack presence (P7) is not read yet — see PLAN-sienci-safety-inputs.md.
     // Fixed wiring on a known kit, so the fields are shown read-only.
     sienci: {
-      clampOut: '1', pres: 2, tool: 0, holder: 0, locked: true,
+      clampOut: '1', pres: 2, drawbar: 0, toolSense: 1, locked: true,
       // The kit's taper-blow port is teed off the drawbar valve, so the
       // blow-aware sequence is the right one and stays on.
       taperBlow: true,
@@ -1985,8 +2207,8 @@
       names: {
         'pa-clamp-aux': 'Drawbar',
         'pa-adv-input-pres': 'Pressure',
-        'pa-adv-input-tool': 'Drawbar',
-        'pa-adv-input-holder': 'Tool holder'
+        'pa-adv-input-drawbar': 'Drawbar',
+        'pa-adv-input-toolsense': 'Tool sensor'
       }
     }
   };
@@ -2008,8 +2230,11 @@
     var seedPins = fromUser || p.locked;
     if (seedPins) {
       setPressurePin(p.pres);
-      setAdvPin('pa-adv-input-tool', p.tool);
-      setAdvPin('pa-adv-input-holder', p.holder);
+      setAdvPin('pa-adv-input-drawbar', p.drawbar);
+      // Deliberately not seeded from the profile: see the `toolSense` note on
+      // the Sienci kit below. A tool-in-spindle check has to be pointed at a
+      // real tool sensor by whoever wired one.
+      setAdvPin('pa-adv-input-toolsense', p.toolSense);
       if (p.clampOut !== null) setClampAux(p.clampOut);
       if (typeof p.taperBlow === 'boolean') $('pa-adv-taper-blow').checked = p.taperBlow;
     }
@@ -2025,14 +2250,11 @@
       var wrap = tb.closest('.pa-toggle');
       if (wrap) wrap.classList.toggle('pa-locked', locked);
     })();
-    ['pa-adv-input-pres', 'pa-adv-input-tool', 'pa-adv-input-holder', 'pa-clamp-aux']
+    ['pa-adv-input-pres', 'pa-adv-input-drawbar', 'pa-adv-input-toolsense', 'pa-clamp-aux']
       .forEach(function(id) {
         var el = $(id);
         if (!el) return;
-        // Tool Sensor / Tool Holder aren't implemented yet, so they stay
-        // disabled regardless; the profile only decides the other two.
-        var previewOnly = (id === 'pa-adv-input-tool' || id === 'pa-adv-input-holder');
-        el.disabled = locked || previewOnly;
+        el.disabled = locked;
         el.classList.toggle('pa-locked', locked);
         showPinAsLabel(id, locked, (p.names || {})[id], !!p.suppressMissingWarning);
       });
@@ -2057,7 +2279,9 @@
       }
       if (Number.isFinite(p.slideSpeed)) {
         var slideS = $('pa-slide-speed');
-        if (slideS) slideS.value = String(p.slideSpeed);
+        // Profile values are mm/min: show them in the operator's units like
+        // every other field, or saving in imperial multiplies them by 25.4.
+        if (slideS) slideS.value = fmtCoord(p.slideSpeed);
       }
       if (Number.isFinite(p.keepoutPadding)) {
         var kp = $('pa-keepout-padding');
@@ -2361,7 +2585,11 @@
       get: function() {
         var b = qs('.pa-segment-btn.active', seg);
         return b ? b.getAttribute('data-value') : null;
-      }
+      },
+      // A segment initialised while its page is hidden measures its buttons
+      // at zero width, so the indicator never shows. Call once the page is
+      // visible to place it.
+      relayout: function() { moveIndicator(qs('.pa-segment-btn.active', seg)); }
     };
   }
 
@@ -2403,6 +2631,92 @@
   }
   var rackHoldingSelect = $('pa-rack-holding');
   if (rackHoldingSelect) rackHoldingSelect.addEventListener('change', updateRackHoldingVisibility);
+
+  // Moving tool rack switch: dim and disable the pin fields while it's off.
+  // The values stay in the selects (a disabled select still reports its
+  // value), so gatherFormData keeps saving them and they're still there when
+  // the switch is turned back on.
+  function updateToolRackEnabled() {
+    var box = $('pa-adv-toolrack-enabled');
+    var fields = $('pa-adv-toolrack-fields');
+    if (!box || !fields) return;
+    fields.style.opacity = box.checked ? '' : '0.5';
+    qsa('select', fields).forEach(function(s) { s.disabled = !box.checked; });
+  }
+  var toolRackBox = $('pa-adv-toolrack-enabled');
+  if (toolRackBox) toolRackBox.addEventListener('change', updateToolRackEnabled);
+
+  // Probe holder: same rule — Cup drops top-down, Fork slides.
+  var segProbeSlideAxis = initSegment('pa-probe-slide-axis');
+  var segProbeSlideDir  = initSegment('pa-probe-slide-direction');
+  function relayoutProbeSegments() {
+    if (segProbeSlideAxis) segProbeSlideAxis.relayout();
+    if (segProbeSlideDir)  segProbeSlideDir.relayout();
+    if (segProbeVerifyMode) segProbeVerifyMode.relayout();
+  }
+  function updateProbeHoldingVisibility() {
+    var block = $('pa-probe-fork-settings');
+    var holding = $('pa-probe-holding');
+    if (!block || !holding) return;
+    block.style.display = holding.value === 'Cup' ? 'none' : '';
+    if (holding.value !== 'Cup') setTimeout(relayoutProbeSegments, 0);
+  }
+  var probeHoldingSelect = $('pa-probe-holding');
+  if (probeHoldingSelect) probeHoldingSelect.addEventListener('change', updateProbeHoldingVisibility);
+
+  // ---- Probe verification: Simple (generated) / Advanced (editor) ----
+  // Mirror of probeVerifyRoutine() in commands.js — keep the two in step.
+  // Emits machine coordinates in mm; the editor shows exactly what will run.
+  function generateProbeVerifyGcode() {
+    var px = toMetric(parseFloatOr($('pa-probe-x').value, 0));
+    var py = toMetric(parseFloatOr($('pa-probe-y').value, 0));
+    var vz = toMetric(parseFloatOr($('pa-probe-verify-z').value, -80));
+    var zSafe = Number.isFinite(initialConfig.zSafe) ? initialConfig.zSafe : 0;
+    var axis = segProbeSlideAxis && segProbeSlideAxis.get() === 'Y' ? 'Y' : 'X';
+    var sign = segProbeSlideDir && segProbeSlideDir.get() === 'Positive' ? '' : '-';
+    return [
+      '(Verify probe: touch the holder edge)',
+      'G53 G0 Z' + vz,
+      'G53 G0 X' + px + ' Y' + py,
+      'G38.2 G91 ' + axis + sign + '12 F150',
+      'G90',
+      'G53 G0 X' + px + ' Y' + py,
+      'G53 G0 Z' + zSafe
+    ].join('\n');
+  }
+  // Set while the saved mode is being restored at load, so the switch
+  // handler below doesn't treat it as the operator switching to Advanced
+  // and overwrite their saved routine with a freshly generated one.
+  var restoringVerifyMode = false;
+  var segProbeVerifyMode = initSegment('pa-probe-verify-mode', function(mode) {
+    updateProbeVerifyVisibility();
+    // Switching to Advanced seeds the editor from the Simple settings —
+    // only on a real switch, never while restoring the saved state.
+    if (mode === 'advanced' && probeVerifyEditor && !restoringVerifyMode) {
+      probeVerifyEditor.setValue(generateProbeVerifyGcode());
+      setTimeout(layoutMonaco, 0);
+    }
+  });
+  function updateProbeVerifyVisibility() {
+    var on = !!($('pa-probe-verify-enabled') && $('pa-probe-verify-enabled').checked);
+    var body = $('pa-probe-verify-body');
+    if (body) { body.style.opacity = on ? '' : '0.45'; body.style.pointerEvents = on ? '' : 'none'; }
+    var mode = segProbeVerifyMode ? segProbeVerifyMode.get() : 'simple';
+    var simple = $('pa-probe-verify-simple'), adv = $('pa-probe-verify-advanced');
+    if (simple) simple.style.display = mode === 'advanced' ? 'none' : '';
+    if (adv)    adv.style.display    = mode === 'advanced' ? '' : 'none';
+    if (mode === 'advanced') setTimeout(layoutMonaco, 0);
+  }
+  var verifyEnabledEl = $('pa-probe-verify-enabled');
+  if (verifyEnabledEl) verifyEnabledEl.addEventListener('change', updateProbeVerifyVisibility);
+  var verifyRegen = $('pa-probe-verify-regenerate');
+  if (verifyRegen) verifyRegen.addEventListener('click', function() {
+    if (probeVerifyEditor) probeVerifyEditor.setValue(generateProbeVerifyGcode());
+  });
+  var verifyGrab = $('pa-probe-verify-grab');
+  if (verifyGrab) verifyGrab.addEventListener('click', function() {
+    $('pa-probe-verify-z').value = fmtCoord(lastMPos.z);
+  });
 
   // Promise-based confirm modal. Resolves true (populate) / false (keep).
   function showAutoPopulateConfirm() {
@@ -2519,7 +2833,10 @@
 
   $('pa-slots').addEventListener('change', function() {
     if (segLayout && segLayout.get() === 'custom') rebuildSlotTable();
+    updateProbeToolBounds();
   });
+  $('pa-probe-enabled').addEventListener('change', updateProbeEnabledState);
+  $('pa-probe-tool').addEventListener('change', updateProbeToolBounds);
 
   // ---------- Grab buttons (single-coord targets) ----------
   function grabInto(prefix) {
@@ -2538,6 +2855,7 @@
   bindGrab('pa-slot1-grab', 'slot1');
   bindGrab('pa-toolsetter-grab', 'toolsetter');
   bindGrab('pa-manualtool-grab', 'manualtool');
+  bindGrab('pa-probe-grab', 'probe');
 
   // ---------- Machine coord subscription ----------
   function extractCoords(payload) {
@@ -2601,7 +2919,10 @@
         while (select.firstChild) select.removeChild(select.firstChild);
         if (includeDisabled) {
           var opt = document.createElement('option');
-          opt.value = '-1'; opt.textContent = 'Disabled';
+          // Only the tool rack asks for this. "Disabled" would read as a second
+          // on/off next to the Moving tool rack switch; this is just "nothing
+          // chosen yet".
+          opt.value = '-1'; opt.textContent = 'Select output…';
           select.appendChild(opt);
         }
         ['M8', 'M7'].forEach(function(code) {
@@ -2626,6 +2947,7 @@
         }
       }
       fill($('pa-clamp-aux'), false, initialConfig.clampAuxOutput);
+      fill($('pa-adv-toolrack-output'), true, initialConfig.toolRackAuxOutput);
       // Re-apply the profile now the real option names exist, so a locked
       // field shows "Aux Out P1" (or the user's alias) rather than a
       // placeholder — and so the value survives the list being rebuilt.
@@ -2642,6 +2964,7 @@
   var preTlsEditor = null;
   var postTlsEditor = null;
   var abortEditor = null;
+  var probeVerifyEditor = null;
   function isLight() { return document.body.classList.contains('theme-light'); }
   function initMonaco() {
     if (!window.monaco) return;
@@ -2666,6 +2989,11 @@
     if ($('pa-post-editor'))     postEditor    = monaco.editor.create($('pa-post-editor'),     Object.assign({}, opts, { value: initialConfig.postToolChangeGcode || '' }));
     if ($('pa-pre-tls-editor'))  preTlsEditor  = monaco.editor.create($('pa-pre-tls-editor'),  Object.assign({}, opts, { value: initialConfig.preTlsGcode         || '' }));
     if ($('pa-post-tls-editor')) postTlsEditor = monaco.editor.create($('pa-post-tls-editor'), Object.assign({}, opts, { value: initialConfig.postTlsGcode        || '' }));
+    if ($('pa-probe-verify-editor')) {
+      var savedVerify = initialConfig.probe && (initialConfig.probe.verify ? initialConfig.probe.verify.gcode : initialConfig.probe.verifyGcode);
+      probeVerifyEditor = monaco.editor.create($('pa-probe-verify-editor'),
+        Object.assign({}, opts, { value: savedVerify || '' }));
+    }
     // Editor shows only the user's addition. Prefer the explicit
     // `abortEventGcodeUser` field; fall back to stripping the
     // leading auto-injected clamp line from `abortEventGcode` for
@@ -2678,16 +3006,19 @@
       abortEditor = monaco.editor.create($('pa-abort-editor'), Object.assign({}, opts, { value: abortInitial || '' }));
     }
     // Mark dirty on any editor content change — feeds the close confirm.
-    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor].forEach(function(e) {
+    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor, probeVerifyEditor].forEach(function(e) {
       if (e && typeof markDirty === 'function') e.onDidChangeModelContent(markDirty);
     });
 
     new MutationObserver(function() {
       monaco.editor.setTheme(isLight() ? 'ncsender-light' : 'ncsender-dark');
     }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+    // applyInitial() ran before this, when probeVerifyEditor was still null.
+    if (typeof updateProbeEnabledState === 'function') updateProbeEnabledState();
   }
   function layoutMonaco() {
-    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor].forEach(function(e) { if (e) e.layout(); });
+    [preEditor, postEditor, preTlsEditor, postTlsEditor, abortEditor, probeVerifyEditor].forEach(function(e) { if (e) e.layout(); });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMonaco);
   else setTimeout(initMonaco, 50);
@@ -2712,6 +3043,50 @@
     // Air-pressure sensor input (-1 / missing = no sensor = blank field).
     var savedPres = initialConfig.pressureInput;
     setPressurePin((typeof savedPres === 'number' && savedPres >= 0) ? savedPres : '');
+    var savedDrawbar = initialConfig.drawbarInput;
+    setPinValue('pa-adv-input-drawbar', (typeof savedDrawbar === 'number' && savedDrawbar >= 0) ? savedDrawbar : '');
+    var savedToolSense = initialConfig.toolSensorInput;
+    setPinValue('pa-adv-input-toolsense', (typeof savedToolSense === 'number' && savedToolSense >= 0) ? savedToolSense : '');
+    // Retractable tool rack — two independent end-stop sensors, same
+    // -1/missing = blank convention. The output itself is seeded by
+    // populateAuxOutputs(), once its option list actually exists.
+    var savedRackAvailable = initialConfig.toolRackAvailableSensorInput;
+    setPinValue('pa-adv-input-toolrack-available', (typeof savedRackAvailable === 'number' && savedRackAvailable >= 0) ? savedRackAvailable : '');
+    var savedRackUnavailable = initialConfig.toolRackUnavailableSensorInput;
+    setPinValue('pa-adv-input-toolrack-unavailable', (typeof savedRackUnavailable === 'number' && savedRackUnavailable >= 0) ? savedRackUnavailable : '');
+    // Seed the saved rack output now, not only from populateAuxOutputs(): if
+    // the controller's output list never loads (offline), an empty select
+    // would save as -1 and silently turn a configured rack off. The later
+    // fill() replaces these placeholders with the properly named options.
+    // Skipped when fill() already won the race and built the real list.
+    (function seedRackOutput() {
+      var sel = $('pa-adv-toolrack-output');
+      if (!sel || sel.options.length > 0) return;
+      var saved = initialConfig.toolRackAuxOutput;
+      var none = document.createElement('option');
+      none.value = '-1'; none.textContent = 'Select output…';
+      sel.appendChild(none);
+      if (saved === 'M7' || saved === 'M8' || (typeof saved === 'number' && saved >= 0)) {
+        var cur = document.createElement('option');
+        cur.value = String(saved);
+        cur.textContent = /^M[78]$/.test(String(saved)) ? String(saved) : ('Aux Out P' + saved);
+        sel.appendChild(cur);
+        sel.value = String(saved);
+      }
+    })();
+    // The switch. A config saved before it existed has no toolRackEnabled:
+    // the rack was on exactly when an output was configured, so show it that
+    // way (commands.js derives the same default) instead of switching an
+    // existing rack off on the next save.
+    (function loadToolRackToggle() {
+      var box = $('pa-adv-toolrack-enabled');
+      if (!box) return;
+      var saved = initialConfig.toolRackEnabled;
+      var out = initialConfig.toolRackAuxOutput;
+      var hasOutput = out === 'M7' || out === 'M8' || (typeof out === 'number' && out >= 0);
+      box.checked = (typeof saved === 'boolean') ? saved : hasOutput;
+      updateToolRackEnabled();
+    })();
     $('pa-adv-taper-blow').checked = !!initialConfig.taperBlow;
 
     // Profile last, so it can lock/overwrite the pin fields it owns. Silent:
@@ -2744,12 +3119,42 @@
     $('pa-manualtool-x').value = fmtCoord(manual.x ?? 0);
     $('pa-manualtool-y').value = fmtCoord(manual.y ?? 0);
 
+    var probe = initialConfig.probe || {};
+    $('pa-probe-enabled').checked = !!probe.enabled;
+    $('pa-probe-holding').value = probe.holding || 'Fork';
+    if (segProbeSlideAxis) segProbeSlideAxis.set(probe.slideAxis || 'X');
+    if (segProbeSlideDir)  segProbeSlideDir.set(probe.slideDirection || 'Negative');
+    $('pa-probe-slide-distance').value = fmtCoord(probe.slideDistance ?? 40);
+    $('pa-probe-slide-speed').value = fmtCoord(probe.slideSpeed ?? 500);
+    updateProbeHoldingVisibility();
+    $('pa-probe-x').value = fmtCoord(probe.x ?? 0);
+    $('pa-probe-y').value = fmtCoord(probe.y ?? 0);
+    $('pa-probe-z').value = fmtCoord(probe.z ?? -100);
+    // Verification. Configs saved before the Simple/Advanced split carried
+    // a bare verifyGcode string: non-empty meant a custom routine.
+    var verify = probe.verify || {
+      enabled: !!(probe.verifyGcode && probe.verifyGcode.trim()),
+      mode: (probe.verifyGcode && probe.verifyGcode.trim()) ? 'advanced' : 'simple',
+      z: (probe.z ?? -100) + 20,
+      gcode: probe.verifyGcode || ''
+    };
+    $('pa-probe-verify-enabled').checked = verify.enabled !== false;
+    $('pa-probe-verify-z').value = fmtCoord(verify.z ?? ((probe.z ?? -100) + 20));
+    restoringVerifyMode = true;
+    if (segProbeVerifyMode) segProbeVerifyMode.set(verify.mode === 'advanced' ? 'advanced' : 'simple');
+    restoringVerifyMode = false;
+    updateProbeVerifyVisibility();
+    // Seed the number before clamping so a saved value survives; the clamp
+    // only kicks in when the rack has since grown past it.
+    $('pa-probe-tool').value = String(probe.toolNumber ?? PROBE_TOOL_DEFAULT);
+    updateProbeToolBounds();
+    updateProbeEnabledState();
+
     var db = initialConfig.dialogBehavior || {};
     $('pa-dialog-countdown-sec').value = String(typeof db.countdownSec === 'number' ? db.countdownSec : 5);
     $('pa-dialog-chain-steps').checked = !!db.chainSteps;
 
     $('pa-show-macro-command').checked = !!initialConfig.showMacroCommand;
-    $('pa-perform-tls-after-home').checked = !!initialConfig.performTlsAfterHome;
 
     // Migrate legacy 'first' (removed in v0.1.35) → 'library'; the new
     // 'library' mode probes automatically when the tool has no TLO yet.
@@ -2768,12 +3173,61 @@
     if (segLayout && segLayout.get() === 'custom') rebuildSlotTable();
   }
 
+  // ---------- Probe tab ----------
+  // The probe is modelled as one more tool, so its number must sit clear of
+  // every rack slot — slot N is tool N, so the floor is slots + 1. The floor
+  // moves whenever the rack grows, and a number that was legal for a 4-slot
+  // rack is not legal for a 10-slot one, so re-clamp on every slot change.
+  var PROBE_TOOL_DEFAULT = 99;
+
+  function probeToolFloor() {
+    var slots = parseInt($('pa-slots').value, 10);
+    return (Number.isFinite(slots) ? slots : 1) + 1;
+  }
+  function updateProbeToolBounds() {
+    var el = $('pa-probe-tool');
+    if (!el) return;
+    var floor = probeToolFloor();
+    el.min = String(floor);
+    var help = $('pa-probe-tool-help');
+    if (help) {
+      help.textContent = 'The tool number that loads the probe. It has to sit above the rack so '
+        + 'it cannot collide with a slot number — T' + floor + ' or higher with the current '
+        + 'rack size. Default is T' + PROBE_TOOL_DEFAULT + '.';
+    }
+    var n = parseInt(el.value, 10);
+    if (!Number.isFinite(n) || n < floor) el.value = String(Math.max(floor, PROBE_TOOL_DEFAULT));
+  }
+
+  // Everything below the enable toggle is inert until the loader is on.
+  function updateProbeEnabledState() {
+    var on = !!($('pa-probe-enabled') && $('pa-probe-enabled').checked);
+    var card = $('pa-probe-settings');
+    if (card) {
+      card.style.opacity = on ? '' : '0.45';
+      card.style.pointerEvents = on ? '' : 'none';
+    }
+    ['pa-probe-tool', 'pa-probe-holding', 'pa-probe-x', 'pa-probe-y', 'pa-probe-z', 'pa-probe-grab',
+     'pa-probe-slide-distance', 'pa-probe-slide-speed',
+     'pa-probe-verify-enabled', 'pa-probe-verify-z', 'pa-probe-verify-grab', 'pa-probe-verify-regenerate']
+      .forEach(function(id) { var el = $(id); if (el) el.disabled = !on; });
+    var verify = $('pa-probe-verify-card');
+    if (verify) {
+      verify.style.opacity = on ? '' : '0.45';
+      verify.style.pointerEvents = on ? '' : 'none';
+    }
+    if (probeVerifyEditor) probeVerifyEditor.updateOptions({ readOnly: !on });
+  }
+
   function updateLabelUnits() {
     var u = unitLabel(), f = feedLabel();
     $('pa-label-slot-distance').textContent = 'Slot Distance (' + u + ')';
     $('pa-label-slide-distance').textContent = 'Slide Distance (' + u + ')';
     $('pa-label-slide-speed').textContent = 'Slide Speed (' + f + ')';
     $('pa-label-keepout-padding').textContent = 'Safety Margin (' + u + ')';
+    $('pa-label-probe-slide-distance').textContent = 'Slide Distance (' + u + ')';
+    $('pa-label-probe-slide-speed').textContent = 'Slide Speed (' + f + ')';
+    $('pa-label-probe-verify-z').textContent = 'Verify Z (' + u + ')';
     $('pa-label-seek-start-z').textContent = 'Seek Start Z (' + u + ')';
     $('pa-label-seek-distance').textContent = 'Seek Distance (' + u + ')';
     $('pa-label-seek-feedrate').textContent = 'Seek Feedrate (' + f + ')';
@@ -2826,6 +3280,31 @@
         var n = Number.parseInt(sel ? sel.value : '', 10);
         return Number.isFinite(n) && n >= 0 ? n : -1;
       })(),
+      drawbarInput: (function() {
+        var sel = $('pa-adv-input-drawbar');
+        var n = Number.parseInt(sel ? sel.value : '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : -1;
+      })(),
+      toolSensorInput: (function() {
+        var sel = $('pa-adv-input-toolsense');
+        var n = Number.parseInt(sel ? sel.value : '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : -1;
+      })(),
+      // Retractable tool rack: the on/off switch, plus the aux output and two
+      // independent end-stop sensors. The pins are saved even while the
+      // switch is off, so turning it back on doesn't mean picking them again.
+      toolRackEnabled: !!($('pa-adv-toolrack-enabled') && $('pa-adv-toolrack-enabled').checked),
+      toolRackAuxOutput: parseAuxValue($('pa-adv-toolrack-output')),
+      toolRackAvailableSensorInput: (function() {
+        var sel = $('pa-adv-input-toolrack-available');
+        var n = Number.parseInt(sel ? sel.value : '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : -1;
+      })(),
+      toolRackUnavailableSensorInput: (function() {
+        var sel = $('pa-adv-input-toolrack-unavailable');
+        var n = Number.parseInt(sel ? sel.value : '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : -1;
+      })(),
       // Taper blow / cone clean plumbed off the drawbar valve.
       taperBlow: $('pa-adv-taper-blow').checked,
       rackHolding: $('pa-rack-holding').value || 'Fork',
@@ -2848,7 +3327,6 @@
 
       tlsMode: tlsMode,
       performTlsOnToolChange: tlsMode === 'always',
-      performTlsAfterHome: $('pa-perform-tls-after-home').checked,
       toolsetter: {
         x: toMetric(parseFloatOr($('pa-toolsetter-x').value, 0)),
         y: toMetric(parseFloatOr($('pa-toolsetter-y').value, 0))
@@ -2860,6 +3338,28 @@
       manualTool: {
         x: toMetric(parseFloatOr($('pa-manualtool-x').value, 0)),
         y: toMetric(parseFloatOr($('pa-manualtool-y').value, 0))
+      },
+
+      probe: {
+        enabled: $('pa-probe-enabled').checked,
+        // Clamped on the way out too — the field is disabled while the loader
+        // is off, so a stale sub-floor number could otherwise be persisted.
+        toolNumber: Math.max(probeToolFloor(),
+                             parseInt($('pa-probe-tool').value, 10) || PROBE_TOOL_DEFAULT),
+        holding: $('pa-probe-holding').value || 'Fork',
+        slideAxis: segProbeSlideAxis ? segProbeSlideAxis.get() : 'X',
+        slideDirection: segProbeSlideDir ? segProbeSlideDir.get() : 'Negative',
+        slideDistance: toMetric(parseFloatOr($('pa-probe-slide-distance').value, 40)),
+        slideSpeed: toMetric(parseFloatOr($('pa-probe-slide-speed').value, 500)),
+        x: toMetric(parseFloatOr($('pa-probe-x').value, 0)),
+        y: toMetric(parseFloatOr($('pa-probe-y').value, 0)),
+        z: toMetric(parseFloatOr($('pa-probe-z').value, -100)),
+        verify: {
+          enabled: $('pa-probe-verify-enabled').checked,
+          mode: segProbeVerifyMode ? segProbeVerifyMode.get() : 'simple',
+          z: toMetric(parseFloatOr($('pa-probe-verify-z').value, -80)),
+          gcode: probeVerifyEditor ? probeVerifyEditor.getValue() : ''
+        }
       },
 
       dialogBehavior: {
@@ -3019,6 +3519,12 @@
   }
 
   async function doSave() {
+    // A rack that is switched on but has no output has nothing to drive:
+    // saving it would look enabled and quietly do nothing on every change.
+    var rackSwitch = $('pa-adv-toolrack-enabled');
+    if (rackSwitch && rackSwitch.checked && parseAuxValue($('pa-adv-toolrack-output')) === -1) {
+      throw new Error('The moving tool rack is switched on but no aux output is selected. Pick the output that drives it (Advanced tab), or switch the rack off.');
+    }
     var payload = gatherFormData();
     var res = await fetch(BASE_URL + '/api/plugins/com.ncsender.pneumaticatc/settings', {
       method: 'PUT',
@@ -3036,7 +3542,14 @@
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tool: { count: payload.slots, source: 'com.ncsender.pneumaticatc', manual: true, tls: true, probe: false }
+          // `probe` shows the Probe button in the visualizer's tool legend
+          // next to the slots, Manual and TLS; `probeToolNumber` is what that
+          // button loads, so the core and this plugin agree on the number.
+          tool: {
+            count: payload.slots, source: 'com.ncsender.pneumaticatc', manual: true, tls: true,
+            probe: !!(payload.probe && payload.probe.enabled),
+            probeToolNumber: (payload.probe && payload.probe.toolNumber) || 99
+          }
         })
       });
     } catch (err) {

@@ -23,6 +23,9 @@ const LAYOUT_MODES = ['linear', 'custom'];
 // Legacy 'first' → migrated to 'library' (same net behavior).
 const TLS_MODES = ['library', 'always'];
 const MAX_SLOTS = 32;
+// Upper bound for the probe's tool number. Matches the config UI's max and
+// the two-digit T-word the macro emits.
+const MAX_TOOL_NUMBER = 99;
 
 // Pneumatic drawbar compensation for CUP-style racks only. On a cup rack
 // the tool holder rests on the cup lip and the drawbar's actuation would
@@ -108,6 +111,64 @@ const sanitizeTlsMode = (value, legacyPerformTlsOnChange) => {
   return legacyPerformTlsOnChange === false ? 'library' : 'always';
 };
 
+// Probe auto-loader. The probe is treated as one more tool, so its number
+// has to clear every rack slot (slot N is tool N) — hence the slots + 1
+// floor. Defaults to T99, the far end of the range, so it stays out of the
+// way no matter how large the rack grows.
+const PROBE_TOOL_DEFAULT = 99;
+// `rack` supplies the fallbacks for the fork fields: a holder set up beside
+// the rack most likely slides the same way, so an unset probe inherits the
+// rack's direction, distance and speed, and slides along the rack's slide
+// axis (the one perpendicular to its orientation).
+const sanitizeProbe = (raw = {}, slots = 1, rack = {}) => {
+  const floor = slots + 1;
+  const parsed = Number.parseInt(raw.toolNumber, 10);
+  const toolNumber = Number.isFinite(parsed)
+    ? Math.min(Math.max(parsed, floor), MAX_TOOL_NUMBER)
+    : Math.max(floor, PROBE_TOOL_DEFAULT);
+  return {
+    enabled: !!raw.enabled,
+    toolNumber,
+    holding: raw.holding === 'Cup' ? 'Cup' : 'Fork',
+    // Fork motion for the probe holder. Independent of the rack's: the rack
+    // may be on Cup while the probe sits in a fork, or slide the other way.
+    slideAxis: raw.slideAxis === 'Y' ? 'Y' : raw.slideAxis === 'X' ? 'X'
+             : (sanitizeOrientation(rack.orientation) === 'Y' ? 'X' : 'Y'),
+    slideDirection: sanitizeSlideDirection(raw.slideDirection ?? rack.slideDirection),
+    slideDistance: toFiniteNumber(raw.slideDistance, toFiniteNumber(rack.slideDistance, 40)),
+    slideSpeed: toFiniteNumber(raw.slideSpeed, toFiniteNumber(rack.slideSpeed, 500)),
+    x: toFiniteNumber(raw.x),
+    y: toFiniteNumber(raw.y),
+    z: toFiniteNumber(raw.z, -100),
+    verify: sanitizeProbeVerify(raw.verify, raw.verifyGcode, toFiniteNumber(raw.z, -100))
+  };
+};
+
+// Verification that the probe actually works, run after the pickup and
+// before its TLS. Two ways to describe it:
+//   simple   — one number, the machine Z at which the needle tip is level
+//              with the holder's mount. The routine is generated from it
+//              (see probeVerifyRoutine).
+//   advanced — the operator's own G-code, seeded from the simple routine
+//              when they switch over.
+// `legacyGcode` is the pre-split `verifyGcode` string: non-empty meant a
+// custom routine (advanced), empty meant no check.
+const sanitizeProbeVerify = (raw, legacyGcode, holderZ) => {
+  const hasRaw = raw && typeof raw === 'object';
+  const legacy = typeof legacyGcode === 'string' ? legacyGcode.trim() : '';
+  const mode = hasRaw
+    ? (raw.mode === 'advanced' ? 'advanced' : 'simple')
+    : (legacy ? 'advanced' : 'simple');
+  return {
+    enabled: hasRaw ? raw.enabled !== false : !!legacy,
+    mode,
+    // Default a little above the holder so a first run is a free move
+    // rather than a crash; the operator sets it from the Probe page.
+    z: toFiniteNumber(hasRaw ? raw.z : undefined, holderZ + 20),
+    gcode: hasRaw ? (raw.gcode ?? '') : legacy
+  };
+};
+
 const sanitizeCoords2D = (coords = {}) => ({
   x: toFiniteNumber(coords.x),
   y: toFiniteNumber(coords.y)
@@ -156,6 +217,8 @@ function migrateLegacyTlsAux(auxOutput, action) {
   return cmd ? `G4 P0\n${cmd}\nG4 P0` : '';
 }
 
+const SIENCI_SLIDE_SPEED = 2000;   // mm/min, Sienci's published fork-slide feed
+
 const buildInitialConfig = (raw = {}) => {
   const slots = clampSlots(raw.slots ?? raw.pockets);
   // Slot 1 coords — accept new (`slot1`) or legacy (`pocket1`) keys, and the
@@ -170,7 +233,11 @@ const buildInitialConfig = (raw = {}) => {
     direction: sanitizeDirection(raw.direction),
     slideDirection: sanitizeSlideDirection(raw.slideDirection),
     slideDistance: toFiniteNumber(raw.slideDistance, 40),
-    slideSpeed: toFiniteNumber(raw.slideSpeed, 500),
+    // The Sienci kit's slide speed is fixed (the field is locked). Imperial
+    // configs saved before the settings screen converted the profile value
+    // hold 2000 x 25.4 = 50800 mm/min, so the kit value is used, not the
+    // stored one.
+    slideSpeed: raw.atcProfile === 'sienci' ? SIENCI_SLIDE_SPEED : toFiniteNumber(raw.slideSpeed, 500),
     // Slot Distance default bumped to 60 — 45 is too tight for the 80 mm
     // spindles common on ATC-equipped machines (tools would collide).
     slotDistance: toFiniteNumber(raw.slotDistance ?? raw.pocketDistance, 60),
@@ -182,7 +249,6 @@ const buildInitialConfig = (raw = {}) => {
     rackHolding: raw.rackHolding === 'Cup' ? 'Cup' : 'Fork',
 
     showMacroCommand: raw.showMacroCommand ?? false,
-    performTlsAfterHome: raw.performTlsAfterHome ?? false,
     tlsMode: sanitizeTlsMode(raw.tlsMode, raw.performTlsOnToolChange),
 
     slot1: { x: toFiniteNumber(slot1Raw.x), y: toFiniteNumber(slot1Raw.y), z: toFiniteNumber(slot1Z, -100) },
@@ -190,6 +256,7 @@ const buildInitialConfig = (raw = {}) => {
     slotCoords: raw.slotCoords || [],
     toolsetter: sanitizeCoords2D(raw.toolsetter ?? raw.toolSetter),
     manualTool: sanitizeCoords2D(raw.manualTool),
+    probe: sanitizeProbe(raw.probe, slots, raw),
 
     zSafe: toFiniteNumber(raw.zSafe, 0),
 
@@ -200,6 +267,10 @@ const buildInitialConfig = (raw = {}) => {
     preToolChangeGcode: raw.preToolChangeGcode ?? '',
     postToolChangeGcode: raw.postToolChangeGcode ?? '',
     abortEventGcode: raw.abortEventGcode ?? '',
+
+    // Rack preset picked in Advanced (e.g. 'sienci'). Only read for
+    // firmware-specific behaviour such as Sienci's keepout (see sienciKeepout).
+    atcProfile: typeof raw.atcProfile === 'string' ? raw.atcProfile : '',
 
     // Pre/Post TLS run right around the G38.2 probe. Backward-compat:
     // if legacy `tlsAuxOutput` is set but the new gcode fields are
@@ -212,6 +283,27 @@ const buildInitialConfig = (raw = {}) => {
     // grblHAL aux INPUT carrying the air-pressure switch. -1 = no sensor
     // wired, which disables every pressure check.
     pressureInput: sanitizeAuxInput(raw.pressureInput),
+    // grblHAL aux INPUT carrying the drawbar-position switch (Sienci's
+    // _tc_input_db — a reed switch on the cylinder). -1 = not wired.
+    drawbarInput: sanitizeAuxInput(raw.drawbarInput),
+    // grblHAL aux INPUT carrying the tool-in-spindle sensor (Sienci's
+    // _tc_input_tis — pullstud / spindle proximity). -1 = not wired.
+    toolSensorInput: sanitizeAuxInput(raw.toolSensorInput),
+    // Retractable tool rack: a digital output extends the rack into position
+    // for a load/unload and retracts it clear afterward, so it doesn't sit in
+    // the machining envelope during a job. Only driven when switched on AND an
+    // output is chosen (see rackActive). A config saved without the switch
+    // keeps its old meaning: on exactly when an output was set.
+    // Two independent end-stop sensors, NOT one sensor read both ways — a
+    // single sensor can't tell "stuck mid-travel" from either confirmed end.
+    // Each is optional on its own; skipping one just leaves that actuation
+    // unverified. Both read OK = HIGH; invert via $370 if wired the other way.
+    toolRackEnabled: raw.toolRackEnabled === undefined
+      ? sanitizeAuxOutput(raw.toolRackAuxOutput) !== -1
+      : !!raw.toolRackEnabled,
+    toolRackAuxOutput: sanitizeAuxOutput(raw.toolRackAuxOutput),
+    toolRackAvailableSensorInput: sanitizeAuxInput(raw.toolRackAvailableSensorInput),
+    toolRackUnavailableSensorInput: sanitizeAuxInput(raw.toolRackUnavailableSensorInput),
     // Taper blow / cone clean plumbed off the drawbar valve (Sienci kit).
     // See DEDUST_* above for what it changes in the sequence.
     taperBlow: !!raw.taperBlow,
@@ -233,11 +325,49 @@ const buildInitialConfig = (raw = {}) => {
 //                             TLS probe motion (e.g. for oddball fixtures).
 //                             Separate from TLO.
 
+// Tool-id concept: a T number is the Tool ID (the tool, not the pocket), so
+// the library is searched by Tool ID first; a slot is only a fallback.
+// Offsets belong to the tool, never the slot.
+function findTool(toolNumber, tools) {
+  return tools.find((t) => t.toolId === toolNumber)
+    || tools.find((t) => t.toolNumber === toolNumber);
+}
+
+// The sequence builders think in physical positions: 1..slots is a rack slot,
+// the probe number is the probe, anything above the rack is a hand-loaded
+// tool. toPhysical() maps a Tool ID onto that: the slot the library puts it
+// in, else a hand-tool number (MANUAL_BASE + id, always above any rack).
+// idOf() maps back so M61, messages and the TLO writeback carry the Tool ID.
+const MANUAL_BASE = 1000;
+let _physToId = new Map();
+function idOf(n) {
+  return _physToId.has(n) ? _physToId.get(n) : n;
+}
+function toPhysical(id, settings, tools) {
+  if (!id || id <= 0) return 0;
+  if (isProbeTool(settings, id)) return id;
+  const list = Array.isArray(tools) ? tools : [];
+  const tool = list.find((t) => t.toolId === id);
+  let phys;
+  if (tool) {
+    const slot = Number.isInteger(tool.toolNumber) ? tool.toolNumber : 0;
+    phys = slot >= 1 && slot <= settings.slots ? slot : MANUAL_BASE + id;
+  } else {
+    // Not in the library. Keep the old meaning (T = slot) only while that
+    // slot isn't holding some other identified tool; an empty library
+    // therefore behaves exactly as before.
+    const occupant = list.find((t) => t.toolNumber === id);
+    phys = id <= settings.slots && (!occupant || occupant.toolId == null) ? id : MANUAL_BASE + id;
+  }
+  _physToId.set(phys, id);
+  return phys;
+}
+
 function getToolProbeOffsets(toolNumber, tools) {
   if (!toolNumber || toolNumber <= 0 || !Array.isArray(tools)) {
     return { x: 0, y: 0, z: 0 };
   }
-  const tool = tools.find((t) => t.toolNumber === toolNumber);
+  const tool = findTool(toolNumber, tools);
   if (tool && tool.offsets) {
     return { x: tool.offsets.x || 0, y: tool.offsets.y || 0, z: tool.offsets.tlsZ || 0 };
   }
@@ -246,7 +376,7 @@ function getToolProbeOffsets(toolNumber, tools) {
 
 function getStoredTlo(toolNumber, tools) {
   if (!toolNumber || toolNumber <= 0 || !Array.isArray(tools)) return 0;
-  const tool = tools.find((t) => t.toolNumber === toolNumber);
+  const tool = findTool(toolNumber, tools);
   if (!tool || !tool.offsets) return 0;
   return tool.offsets.z || 0;
 }
@@ -255,6 +385,33 @@ function getStoredTlo(toolNumber, tools) {
 const getToolOffsets = getToolProbeOffsets;
 
 // === G-code helpers ===
+
+// Withholds the `$keepout_off` prefix from a single line (see formatGCode,
+// which strips the marker before the line is sent).
+const CORE_CHECKED_MARKER = '(ncs-checked)';
+
+// Every G53 leg this plugin emits is rack routing it computed itself and
+// can vouch for — except the last one. The exit legs end at `returnTo`,
+// which is wherever the operator happened to leave the spindle when they
+// typed M6, and cancelling a tool load leaves it parked INSIDE the rack.
+// Blanket-prefixing that leg asserts a safety property this plugin has no
+// basis to assert, and drives the spindle back into the studs.
+//
+// Hand just that leg to the core's keepout check instead: if the
+// destination is clear it runs exactly as before, and if it is inside the
+// zone the core refuses it and the spindle stays at the rack edge — the
+// position the exit routing just brought it to, which is known safe.
+function handFinalLegToCoreCheck(section) {
+  if (!section) return section;
+  const lines = section.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/(^|[^A-Z])G0*53(?:[^0-9]|$)/i.test(lines[i])) {
+      lines[i] = `${lines[i]} ${CORE_CHECKED_MARKER}`;
+      break;
+    }
+  }
+  return lines.join('\n');
+}
 
 function formatGCode(gcode) {
   const lines = gcode.split('\n').map((l) => l.trim()).filter((l) => l !== '');
@@ -282,9 +439,14 @@ function formatGCode(gcode) {
     // parser, so the token would just get logged as an unknown command
     // — we omit it there.
     const isMachineMove = /(^|[^A-Z])G0*53(?:[^0-9]|$)/i.test(line);
-    const prefixed = (isMachineMove && _coreEdition === 'pro')
-      ? `$keepout_off ${line}`
+    // A leg marked by handFinalLegToCoreCheck keeps its keepout check.
+    const coreChecked = line.includes(CORE_CHECKED_MARKER);
+    const emitted = coreChecked
+      ? line.replace(CORE_CHECKED_MARKER, '').trimEnd()
       : line;
+    const prefixed = (isMachineMove && !coreChecked && _coreEdition === 'pro')
+      ? `$keepout_off ${emitted}`
+      : emitted;
     formatted.push(indent + prefixed);
     if (isOCode && (
       upperLine.includes(' IF ') || upperLine.includes(' WHILE ') ||
@@ -316,6 +478,36 @@ function auxOnOff(auxOutput) {
     return { on: `M64 P${auxOutput}`, off: `M65 P${auxOutput}` };
   }
   return { on: '', off: '' };
+}
+
+// === Keeping a Z0 that was set before any Tool Length Reference ===
+//
+// The offset applied here is absolute: G43.1 Z<machine Z where the tool
+// touched the setter>, so work Z = machine Z - G5x Z - TLO. A Z0 set AFTER a
+// reference exists is right for every tool. A Z0 set BEFORE one (TLO still 0)
+// goes wrong the moment the first TLS applies an offset: everything shifts by
+// the whole touch height and the next cut plunges — the "zero first, TLS
+// later" habit gSender users bring with them.
+//
+// The host reports it (machineState.zeroSetWithoutTlr / zeroTool). While the
+// tool that set that Z0 is still in the spindle we keep it by paying the first
+// applied offset back into the work offset, so G5x Z + TLO does not change:
+//   'keepSelf'  measure this tool, apply its offset, shift G5x Z by it.
+//   'reference' measure the tool that set Z0, only remember its touch height.
+//   'keepRef'   measure the new tool, apply its offset, shift G5x Z by the
+//               remembered height of the tool that set Z0.
+// The work offset is written after the offset is active and announced, so the
+// host never mistakes it for a fresh unreferenced Z0.
+// How close the outgoing tool's reference touch must land to its library TLO
+// for the library to be trusted this boot (the kiosk repeats within a few
+// microns; a stale library entry is off by far more).
+const REF_MATCH_TOLERANCE_MM = 0.05;
+
+function zeroKeepPlan(context, currentTool) {
+  const ms = (context && context.machineState) || {};
+  const pending = ms.zeroSetWithoutTlr === true && ms.toolLengthSet !== true;
+  const zeroTool = typeof ms.zeroTool === 'number' ? ms.zeroTool : 0;
+  return { keep: pending && zeroTool === currentTool, swapped: pending && zeroTool !== currentTool };
 }
 
 // === Tool Length Setter routine ===
@@ -376,6 +568,28 @@ function createToolLengthSetRoutine(settings, toolOffsets = { x: 0, y: 0, z: 0 }
     ? `G38.3 G91 Z${approachDelta.toFixed(3)} F99999\n    G90`
     : '';
 
+  // options.mode — see zeroKeepPlan. 'reference' only remembers the touch
+  // height: no offset, no host notification and no [#] dump, so a TLO
+  // writeback armed for the NEXT tool is not consumed by this measurement.
+  // 'measure' only applies the offset: used inside a controller-side if/else,
+  // where grblHAL still runs `$` lines of the branch it skips, so the host
+  // notification and [#] dump are emitted by the caller after the endif.
+  const mode = options.mode || 'normal';
+  const applyOffset = mode === 'reference'
+    ? `(Remember the touch height of the tool that set Z0)
+    #<_nc_ref_tlo> = #<_nc_last_tlo>`
+    : mode === 'measure'
+    ? `G43.1 Z[#<_nc_last_tlo>]`
+    : `G43.1 Z[#<_nc_last_tlo>]
+    (Notify ncSender that toolLengthSet is now set)
+    $#=_tool_offset${mode === 'keepSelf' ? `
+    (Keep the Z0 that was set before this reference)
+    G10 L2 P[#5220] Z[#<_cur_wcs_z_ofs> - #<_nc_last_tlo>]` : ''}${mode === 'keepRef' ? `
+    (Keep the Z0 that was set with the previous tool)
+    G10 L2 P[#5220] Z[#<_cur_wcs_z_ofs> - #<_nc_ref_tlo>]` : ''}
+    (Trigger a full [#] dump so ncSender receives [TLO:xxx] for writeback)
+    $#`;
+
   const gcode = `
     G53 G0 Z${settings.zSafe}
     ${tlsApproach}
@@ -391,11 +605,7 @@ function createToolLengthSetRoutine(settings, toolOffsets = { x: 0, y: 0, z: 0 }
     #<_ofs_idx> = [#5220 * 20 + 5203]
     #<_cur_wcs_z_ofs> = #[#<_ofs_idx>]
     #<_nc_last_tlo> = [#5063 + #<_cur_wcs_z_ofs>]
-    G43.1 Z[#<_nc_last_tlo>]
-    (Notify ncSender that toolLengthSet is now set)
-    $#=_tool_offset
-    (Trigger a full [#] dump so ncSender receives [TLO:xxx] for writeback)
-    $#
+    ${applyOffset}
   `.trim();
   return gcode.split('\n');
 }
@@ -462,23 +672,100 @@ function createToolLengthSetExitMove(settings, toolOffsets = { x: 0, y: 0, z: 0 
   return waypoints.map((p) => `G53 G0 X${p.x} Y${p.y}`).join('\n    ');
 }
 
+// A user's Pre/Post Tool Change g-code deliberately runs in the PROGRAM's
+// units, not the plugin's: it is spliced outside the G21 wrapper that makes
+// the plugin's own (millimetre) config correct. That stays -- someone running
+// an inch post is thinking in inches, and the snippet reads as part of their
+// program.
+//
+// What must not survive is a modal word set inside the snippet. Write G21 in
+// Post Tool Change "to be safe" on an inch program and every remaining line
+// of the job silently becomes millimetres; write G91 and the rest goes
+// incremental. Either corrupts the whole run with no error and no clue at the
+// machine -- the same shape as the dropped-line bug that cost a customer a
+// job, arriving by a different door.
+//
+// So the snippet is bracketed: capture units and distance mode before it, put
+// them back after. grblHAL exposes both read-only (_metric, _absolute).
+// Feed is deliberately NOT restored: #<_feed> is 0 until the program sets
+// one, and emitting F0 is worse than the leak it would prevent. Most posts
+// re-state F on the next cutting move.
+function modalSafe(snippet, tag) {
+  const body = String(snippet || '').trim();
+  if (!body) return '';
+  return `#<${tag}_units> = [20 + #<_metric>]
+    #<${tag}_dist> = [91 - #<_absolute>]
+    ${body}
+    G[#<${tag}_units>]
+    G[#<${tag}_dist>]`;
+}
+
+// Post Tool Change runs once the new tool is in and the spindle has left the
+// rack (or the tool setter) at safe Z, BEFORE the final leg back to where the
+// change started. It used to run after that leg: a routine that picks up a
+// dust shoe drove back to the work first, went off to the dust shoe, and the
+// job then moved back again. The final leg is the one handed to the core's
+// keepout check (handFinalLegToCoreCheck), so the trip back from wherever the
+// routine leaves the spindle is still checked.
+//
+// splitFinalLeg separates that leg from the rest of an exit; leg is '' when
+// the exit has none (manual / probe-holder paths, endAtTls), and then the
+// event keeps running at the very end as before.
+function splitFinalLeg(exit) {
+  if (!exit) return { body: exit || '', leg: '' };
+  const lines = exit.split('\n');
+  const i = lines.findIndex((l) => l.includes(CORE_CHECKED_MARKER));
+  if (i < 0) return { body: exit, leg: '' };
+  return { body: lines.slice(0, i).join('\n'), leg: lines.slice(i).join('\n') };
+}
+
+// The event in the program's units (see modalSafe), then back to millimetres,
+// safe Z, and the final leg.
+function postToolChangeThenLeg(postCmd, leg, settings) {
+  return `G4 P0
+    G[#<return_units>]
+    ${modalSafe(postCmd, 'post')}
+    G21
+    G53 G0 Z${settings.zSafe}
+    ${leg.trim()}`;
+}
+
 function createToolLengthSetProgram(settings, toolOffsets = { x: 0, y: 0, z: 0 }, options = {}) {
   const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, options).join('\n');
   const preCmd = settings.preToolChangeGcode?.trim() || '';
   const postCmd = settings.postToolChangeGcode?.trim() || '';
-  const tlsExitMove = createToolLengthSetExitMove(settings, toolOffsets, options);
+  // Both callers ($TLS and Measure All Tools' "already in the spindle" step)
+  // probe on the toolsetter, which needs the rack extended the same as any
+  // rack-slot interaction — baked in here once rather than in each caller.
+  // No-ops when the rack isn't switched on and configured.
+  const rackExtend = extendToolRack(settings, 430);
+  const rackRetract = retractToolRack(settings, 440);
+  let tlsExitMove = createToolLengthSetExitMove(settings, toolOffsets, options);
+  // With the origin known the exit ends there; run Post Tool Change before
+  // that last move, which then goes through the core's keepout check.
+  let postAtEnd = !!postCmd;
+  if (postCmd && options.originMPos && tlsExitMove) {
+    const { body, leg } = splitFinalLeg(handFinalLegToCoreCheck(tlsExitMove));
+    if (leg) {
+      tlsExitMove = `${body}
+    ${postToolChangeThenLeg(postCmd, leg, settings)}`;
+      postAtEnd = false;
+    }
+  }
 
   const gcode = `
     (Start of Tool Length Setter)
-    ${preCmd}
+    ${modalSafe(preCmd, 'pre')}
     #<return_units> = [20 + #<_metric>]
     G21
+    ${rackExtend}
     ${tlsRoutine}
     G53 G0 Z${settings.zSafe}
     ${tlsExitMove}
+    ${rackRetract}
     G4 P0
     G[#<return_units>]
-    ${postCmd}
+    ${postAtEnd ? modalSafe(postCmd, 'post') : ''}
     (End of Tool Length Setter)
   `.trim();
   return formatGCode(gcode);
@@ -993,7 +1280,7 @@ function auxLineFor(settings, action) {
 // when this runs, so a short wait is enough: it is either there or it isn't.
 const PRESSURE_WAIT_SEC = 0.5;
 function pressureGuard(settings, oNum) {
-  if (settings.pressureInput < 0) return '';
+  if (!auxInputConfigured(settings.pressureInput)) return '';
   const read = `M66 P${settings.pressureInput} L4 Q${PRESSURE_WAIT_SEC}\n    G4 P0.1`;
   const retry = (n) => `
     o${n} if [#5399 EQ -1]
@@ -1012,6 +1299,253 @@ function pressureGuard(settings, oNum) {
   `.trim();
 }
 
+// Drawbar position and tool-in-spindle. Two inputs Sienci reads that we
+// did not until now (_tc_input_db and _tc_input_tis).
+//
+// They answer different questions and both are worth having:
+//   * The drawbar switch says the MECHANISM moved. It is the honest way to
+//     confirm a release actually happened — the thing the pressure input
+//     cannot tell us. A pressure read taken right after a release reports
+//     the transient, not the supply (see the pressureGuard note above), so
+//     this is the input that closes that hole.
+//   * The tool sensor says the OUTCOME is right: a tool is gripped when one
+//     should be, and the spindle is clear when it should be.
+//
+// Ordering matters. The drawbar checks sit before the Z move that depends
+// on them, so a drawbar that never closed is caught BEFORE the spindle
+// lifts a tool it is not holding. The tool checks sit after that lift,
+// where "is there a tool in the spindle" is finally a settled question.
+//
+// Read convention, shared by both guards and chosen so there is exactly one
+// fault condition in the whole file: `L4` waits for the input to read LOW
+// (asserted), `L3` waits for it to read HIGH (de-asserted), and either way
+// a timeout leaves #5399 == -1. So `#5399 EQ -1` is always "the state we
+// wanted never arrived" — same test as pressureGuard. Operators whose
+// switch reads the other way round invert the port in firmware ($370),
+// exactly as they already do for pressure.
+//
+// No unrolled retry here, unlike pressure. A compressor takes real time to
+// recover, so re-reading it is worth something; a drawbar either actuated
+// or it did not, and a tool is either in the spindle or it is not. Reading
+// again changes nothing, so these fault once and stop.
+//
+// Pneumatics need longer than a pressure switch to finish moving.
+const DRAWBAR_WAIT_SEC = 1;
+const TOOL_SENSE_WAIT_SEC = 0.5;
+
+// A sensor guard is only emitted for a real, configured pin. Checking
+// `pin < 0` alone is not enough: an unsanitized settings object leaves these
+// fields undefined, and `undefined < 0` is false, which would put a literal
+// `M66 Pundefined` into a live tool change. Demand an actual integer >= 0.
+const auxInputConfigured = (pin) => Number.isInteger(pin) && pin >= 0;
+
+// `retreat` is optional: { safeZ, returnZ }. When given, a fault lifts the
+// spindle clear of the rack before the operator is asked to do anything, and
+// drops back down once they continue. Both moves live INSIDE the if-block, so
+// a check that passes emits neither and the happy path is byte-for-byte what
+// it was.
+//
+// The descent is not optional decoration. Continue resumes at the line after
+// M0, and the rest of the sequence assumes the spindle is still where the
+// check found it — on a fork load the very next move is the slide-out, which
+// 100 mm too high would leave the tool in the rack. So whatever the lift
+// raises, the return puts back.
+//
+// The lift is deliberately Z-only, straight up over the slot the tool is in.
+// A lateral retreat is the tempting version and the dangerous one: the faults
+// where the operator most wants their hands free are exactly the ones where
+// we do not know the tool is held, and traversing with a loose tool throws
+// it. Straight up means anything that comes free lands in or beside its own
+// slot. The return is fed at drawbar speed rather than rapided because it can
+// be descending onto a holder.
+function sensorGuard(pin, oNum, waitSec, asserted, msgId, retreat) {
+  const lift = retreat ? `G53 G0 Z${retreat.safeZ}` : '';
+  const back = retreat ? `G53 G1 Z${retreat.returnZ} F${DRAWBAR_FEEDRATE_MMPM}` : '';
+  return `
+    M66 P${pin} ${asserted ? 'L4' : 'L3'} Q${waitSec}
+    o${oNum} if [#5399 EQ -1]
+      ${lift}
+      (MSG, PLUGIN_PNEUMATICATC:${msgId})
+      M0
+      ${back}
+    o${oNum} endif
+  `.trim();
+}
+
+// expect: 'open' after an unclamp, 'closed' after a clamp.
+function drawbarGuard(settings, oNum, expect, retreat) {
+  if (!auxInputConfigured(settings.drawbarInput)) return '';
+  const open = expect === 'open';
+  return sensorGuard(
+    settings.drawbarInput, oNum, DRAWBAR_WAIT_SEC, open,
+    open ? 'DRAWBAR_FAILED_TO_OPEN' : 'DRAWBAR_FAILED_TO_CLOSE',
+    retreat
+  );
+}
+
+// expect: 'present' when a tool should now be gripped, 'empty' when the
+// spindle should be clear.
+function toolGuard(settings, oNum, expect, retreat) {
+  if (!auxInputConfigured(settings.toolSensorInput)) return '';
+  const present = expect === 'present';
+  return sensorGuard(
+    settings.toolSensorInput, oNum, TOOL_SENSE_WAIT_SEC, present,
+    present ? 'TOOL_FAILED_TO_SEAT' : 'TOOL_STILL_GRIPPED',
+    retreat
+  );
+}
+
+// ncSender believes the spindle is empty (T0) while a tool is still seated —
+// the usual case is a restart: the controller forgets the tool number on
+// power-off, so it boots as T0 with whatever was left in the collet. Carrying
+// on as if empty would release the drawbar and take a NEW tool into an
+// occupied spindle. So a change that starts from T0 reads the tool sensor
+// first, before anything else moves (and before the rack extends), and if a
+// tool is there stops with a dialog.
+//
+// The plugin cannot tell WHICH tool it is, so it cannot put it back in the
+// rack by itself. The operator has two ways out:
+//   * Continue: the spindle parks at the manual station and the first dialog
+//     asks them to support the tool; Continue opens the drawbar, a second
+//     dialog asks them to take the tool out, and the change carries on from
+//     empty.
+//   * Abort, tell the controller which tool it is (M61 Q<n>, the Tool ID),
+//     and run the change again: the tool is then unloaded into its own slot.
+//     That is trust-based — nothing senses which slot a tool belongs to.
+//
+// Neither dialog has a custom button. The wireless pendant skips any dialog
+// that does, and a Release button only ever sent `~` — the same resume that
+// Continue does — so the release is a step of its own instead.
+//
+// What a button-free dialog lacks is ncSender's hold-to-arm countdown on
+// custom buttons, which is what gave the operator time to get a hand on the
+// tool before the drawbar opened. Continue would otherwise open it at once and
+// a taper tool simply falls out. So the macro waits the same Countdown
+// (dialogBehavior.countdownSec, 5 s unless changed) before releasing. A dwell
+// can still be cut short with Abort.
+//
+// Same polarity as toolGuard: present reads LOW, so `M66 L0` (an immediate
+// read, no waiting) gives 0 when a tool is gripped. Both trips go around the
+// rack keepout the way the probe holder's do, so the rest of the change still
+// starts from `origin` as it assumes. Not emitted when no tool sensor pin is
+// configured, or for a change that does nothing physical (T0 -> T0).
+function unexpectedToolGuard(settings, oNum, origin) {
+  if (!auxInputConfigured(settings.toolSensorInput)) return '';
+  const park = probeRoute(origin, settings.manualTool, settings);
+  const home = probeRoute(settings.manualTool, origin, settings, true);
+  const countdown = Math.min(30, Math.max(1, Math.round(toFiniteNumber(settings.dialogBehavior?.countdownSec, 5))));
+  return `
+    M66 P${settings.toolSensorInput} L0 Q0
+    o${oNum} if [#5399 EQ 0]
+      ${park}
+      G4 P0
+      (MSG, PLUGIN_PNEUMATICATC:UNEXPECTED_TOOL_DETECTED)
+      M0
+      G4 P${countdown}
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P0.5
+      (MSG, PLUGIN_PNEUMATICATC:UNEXPECTED_TOOL_REMOVE)
+      M0
+      ${home}
+    o${oNum} endif
+  `.trim();
+}
+
+// === Retractable tool rack ===
+//
+// A rack mounted on an actuator that extends it into position for a
+// load/unload and retracts it clear of the machining envelope the rest of
+// the time. One digital output drives it (ON extends, OFF retracts); two
+// independent end-stop inputs confirm each end of travel. The whole feature
+// is off unless it is switched on (toolRackEnabled) and the output is
+// configured.
+
+// Unlike the drawbar and tool checks above, a rack actuator takes real time
+// and can be helped along by hand, so this guard keeps the unrolled read /
+// Re-check / Re-check / "continue unverified" shape of pressureGuard (see
+// there for why it can't be a `while`). `oNum..oNum+2` are its o-word
+// numbers; every call site needs its own, spaced to not collide in one macro.
+// Returns '' for an unwired input.
+function rackSensorGuard(input, faultMsg, unverifiedMsg, oNum) {
+  if (!auxInputConfigured(input)) return '';
+  const read = `M66 P${input} L3 Q0.01\n    G4 P0.1`;
+  const retry = (n) => `
+    o${n} if [#5399 EQ -1]
+      (MSG, PLUGIN_PNEUMATICATC:${faultMsg})
+      M0
+      ${read}
+    o${n} endif`;
+  return `
+    ${read}
+    ${retry(oNum).trim()}
+    ${retry(oNum + 1).trim()}
+    o${oNum + 2} if [#5399 EQ -1]
+      (MSG, PLUGIN_PNEUMATICATC:${unverifiedMsg})
+      M0
+    o${oNum + 2} endif
+  `.trim();
+}
+
+// Two separate guards with their own dialogs: "rack didn't confirm
+// available" and "rack didn't confirm retracted" mean different things to the
+// operator. Both OK = HIGH (L3 waits for HIGH).
+function toolRackAvailableGuard(settings, oNum) {
+  return rackSensorGuard(settings.toolRackAvailableSensorInput, 'TOOLRACK_FAULT', 'TOOLRACK_FAULT_UNVERIFIED', oNum);
+}
+function toolRackUnavailableGuard(settings, oNum) {
+  return rackSensorGuard(settings.toolRackUnavailableSensorInput, 'TOOLRACK_RETRACT_FAULT', 'TOOLRACK_RETRACT_FAULT_UNVERIFIED', oNum);
+}
+
+function rackOutputConfigured(settings) {
+  return settings.toolRackAuxOutput === 'M7' || settings.toolRackAuxOutput === 'M8'
+    || (typeof settings.toolRackAuxOutput === 'number' && settings.toolRackAuxOutput >= 0);
+}
+
+// The rack is only driven when it is switched on AND an output is chosen —
+// an enabled rack with no output has nothing to drive. Only an explicit
+// `false` switches it off: an unsanitized settings object that predates the
+// toggle has no toolRackEnabled at all and keeps its old meaning (on exactly
+// when an output is configured).
+function rackActive(settings) {
+  return settings.toolRackEnabled !== false && rackOutputConfigured(settings);
+}
+
+// Fire the rack actuator, then verify it got there if that end's sensor is
+// wired. Each forces its own Z-safe move first rather than trusting the
+// caller to already be at a safe height: moving the rack while the spindle is
+// still down near slot depth risks the rack travelling into its path. A
+// harmless no-op when the spindle is already there.
+//
+// G4 P0 forces a hard planner sync point: unlike two consecutive G0 moves,
+// which the controller can blend instead of fully stopping in between, a
+// dwell (even a zero-length one) can't start until all queued motion has
+// truly come to rest. That's what keeps the rack from actuating while the
+// Z-safe move above is still in flight — reported on hardware as the rack
+// retracting while the spindle was still on its way up. The dwell time itself
+// is moot, so there's nothing to configure.
+//
+// Returns '' entirely when the rack isn't switched on and configured.
+function extendToolRack(settings, oNum) {
+  if (!rackActive(settings)) return '';
+  const { on } = auxOnOff(settings.toolRackAuxOutput);
+  return `
+    G53 G0 Z${settings.zSafe}
+    G4 P0
+    ${on}
+    ${toolRackAvailableGuard(settings, oNum)}
+  `.trim();
+}
+function retractToolRack(settings, oNum) {
+  if (!rackActive(settings)) return '';
+  const { off } = auxOnOff(settings.toolRackAuxOutput);
+  return `
+    G53 G0 Z${settings.zSafe}
+    G4 P0
+    ${off}
+    ${toolRackUnavailableGuard(settings, oNum)}
+  `.trim();
+}
+
 function slideFeedrate(settings) {
   return settings.slideSpeed > 0 ? settings.slideSpeed : 500;
 }
@@ -1027,7 +1561,7 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
     return `
       G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
       G4 P0
-      (MSG, PLUGIN_PNEUMATICATC:MANUAL_UNLOAD_TOOL_${currentTool})
+      (MSG, PLUGIN_PNEUMATICATC:MANUAL_UNLOAD_TOOL_${idOf(currentTool)})
       M0
       ${auxLineFor(settings, 'unclamp')}
       M0
@@ -1044,8 +1578,13 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
 
   // Taper blow: lift clear of the holder, then close the drawbar so the
   // blow stops here instead of venting all the way to the next slot.
+  // M64/M65 act the moment the line is read, not when queued motion gets
+  // there. Without the G4 P0 the clamp fires while the lift is still only
+  // queued, closing the drawbar on the tool just released. The dwell is a
+  // planner sync point: it waits for the lift to finish first.
   const closeAfterLiftOff = settings.taperBlow ? `
       G53 G0 Z${settings.slot1.z + DEDUST_LIFT_MM}
+      G4 P0
       ${auxLineFor(settings, 'clamp')}
       G4 P0.5` : '';
 
@@ -1055,8 +1594,10 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
       G53 G0 Z${settings.slot1.z}
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
-      G4 P0.5${closeAfterLiftOff}
+      G4 P0.5
+      ${drawbarGuard(settings, 200, 'open', { safeZ: settings.zSafe, returnZ: settings.slot1.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
       G53 G0 Z${settings.zSafe}
+      ${toolGuard(settings, 201, 'empty')}
       M61 Q0
     `.trim();
   }
@@ -1068,8 +1609,10 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
     G53 G1 X${slotPos.engaged.x} Y${slotPos.engaged.y} F${feed}
     G4 P0.5
     ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
-    G4 P0.5${closeAfterLiftOff}
+    G4 P0.5
+    ${drawbarGuard(settings, 200, 'open', { safeZ: settings.zSafe, returnZ: settings.slot1.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
     G53 G0 Z${settings.zSafe}
+    ${toolGuard(settings, 201, 'empty')}
     M61 Q0
   `.trim();
 }
@@ -1097,11 +1640,11 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
     return `
       G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
       G4 P0${autoRelease}
-      (MSG, PLUGIN_PNEUMATICATC:MANUAL_CLAMP_TOOL_${toolNumber})
+      (MSG, PLUGIN_PNEUMATICATC:MANUAL_CLAMP_TOOL_${idOf(toolNumber)})
       M0
       ${auxLineFor(settings, 'clamp')}
       M0
-      M61 Q${toolNumber}
+      M61 Q${idOf(toolNumber)}
       ${tlsRoutine}
     `.trim();
   }
@@ -1114,7 +1657,8 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
   const releaseFirst = drawbarAlreadyReleased ? '' : `
       G4 P0.5
       ${auxLineFor(settings, 'unclamp')}
-      G4 P0.5`;
+      G4 P0.5
+      ${drawbarGuard(settings, 210, 'open')}`;
 
   // Approach-to-engaged sequence differs by chain context AND hold style:
   //   * chainedFromRack=true (Tm→Tn swap, fork or cup): machine is already
@@ -1153,6 +1697,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       G4 P0.1
       ${auxLineFor(settings, 'unclamp')}
       G4 P${DEDUST_VENT_SEC}
+      ${drawbarGuard(settings, 210, 'open', { safeZ: settings.zSafe, returnZ: settings.slot1.z + DEDUST_LIFT_MM })}
       G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
       G53 G0 Z${approachZ}`;
   const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
@@ -1163,8 +1708,10 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       G4 P0.5
       ${auxLineFor(settings, 'clamp')}${drawbarSeat}
       G4 P${clampSettle}
+      ${drawbarGuard(settings, 211, 'closed', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
+      ${toolGuard(settings, 212, 'present', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
       G53 G0 Z${settings.zSafe}
-      M61 Q${toolNumber}
+      M61 Q${idOf(toolNumber)}
       ${tlsRoutine}
     `.trim();
   }
@@ -1175,9 +1722,207 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
     G4 P0.5
     ${auxLineFor(settings, 'clamp')}${drawbarSeat}
     G4 P${clampSettle}
+    ${drawbarGuard(settings, 211, 'closed', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
+    ${toolGuard(settings, 212, 'present', { safeZ: settings.zSafe, returnZ: settings.slot1.z })}
     G53 G1 X${slotPos.approach.x} Y${slotPos.approach.y} F${feed}
     G53 G0 Z${settings.zSafe}
-    M61 Q${toolNumber}
+    M61 Q${idOf(toolNumber)}
+    ${tlsRoutine}
+  `.trim();
+}
+
+// === Probe auto-loader ===================================================
+//
+// The probe is one more tool: calling its number picks it up from its own
+// holder the way a rack slot would, and calling any other tool while it is
+// in the spindle puts it back. The holder is not part of the rack routing
+// model — it can sit anywhere outside the rack keepout — so every trip to
+// or from it is a routePoint around the keepout box, like the toolsetter.
+// Its fork / cup motion is its own (settings.probe), so a Cup rack can
+// still feed a fork-held probe and vice versa.
+
+function isProbeTool(settings, toolNumber) {
+  return !!(settings.probe && settings.probe.enabled)
+    && toolNumber > 0
+    && toolNumber === settings.probe.toolNumber;
+}
+
+// Holder geometry: `engaged` is where the probe sits; `approach` is where
+// a fork slide starts / ends (the same point for a cup). `parked` is where
+// the spindle is left after a pickup or put-down, at Z-safe.
+function probeHolderPosition(settings) {
+  const p = settings.probe;
+  const engaged = { x: p.x, y: p.y };
+  const cup = p.holding === 'Cup';
+  if (cup) return { engaged, approach: engaged, parked: engaged, z: p.z, cup };
+  const slideSign = p.slideDirection === 'Positive' ? 1 : -1;
+  const off = -slideSign * (p.slideDistance || 0);
+  const approach = p.slideAxis === 'Y'
+    ? { x: engaged.x, y: engaged.y + off }
+    : { x: engaged.x + off, y: engaged.y };
+  // Fork: unload lifts off at engaged (probe stays in the fork); load
+  // slides out to approach before lifting.
+  return { engaged, approach, parked: null, z: p.z, cup };
+}
+
+// Simple-mode verification routine, run right after the pickup while the
+// spindle is still at the holder. Rise to Verify Z (needle tip level with
+// the holder's mount), go back over the holder's centre, then probe
+// sideways toward the holder's edge: a working needle touches the rim
+// within a few millimetres. G38.2 raises the controller's probe alarm if
+// nothing is touched in the full travel, which aborts the tool change
+// before the probe is ever driven at the toolsetter. Back to centre, up
+// to safe Z, and the normal TLS follows. The sideways direction is the
+// holder's slide axis and direction (into the fork; for a cup the same
+// fields, which default from the rack).
+const PROBE_VERIFY_TRAVEL_MM = 12;
+const PROBE_VERIFY_FEED      = 150;
+function probeVerifyRoutine(settings) {
+  const p = settings.probe;
+  const v = p.verify;
+  const axis = p.slideAxis === 'Y' ? 'Y' : 'X';
+  const sign = p.slideDirection === 'Positive' ? '' : '-';
+  return `
+    (Verify probe: touch the holder edge)
+    G53 G0 Z${v.z}
+    G53 G0 X${p.x} Y${p.y}
+    G38.2 G91 ${axis}${sign}${PROBE_VERIFY_TRAVEL_MM} F${PROBE_VERIFY_FEED}
+    G90
+    G53 G0 X${p.x} Y${p.y}
+    G53 G0 Z${settings.zSafe}
+  `.trim().split('\n').map((l) => l.trim()).join('\n');
+}
+
+// The verification block that replaces the plain rise to safe Z after the
+// pickup: nothing when it is off, the generated routine in simple mode,
+// the operator's text in advanced mode. Either way the caller follows it
+// with its own rise to safe Z, so a custom routine need not end there.
+function probeVerifyGcode(settings) {
+  const v = settings.probe && settings.probe.verify;
+  if (!v || !v.enabled) return '';
+  if (v.mode === 'advanced') return (v.gcode || '').trim();
+  return probeVerifyRoutine(settings);
+}
+
+function probeSlideFeedrate(settings) {
+  return settings.probe.slideSpeed > 0 ? settings.probe.slideSpeed : slideFeedrate(settings);
+}
+
+function probeRoute(from, to, settings, anchorAtDestination = false) {
+  const waypoints = routePoint(from, to, settings, { edgeAnchor: anchorAtDestination ? to : from, freeEdge: true });
+  return waypointsToGCode(waypoints);
+}
+
+// Put the probe back in its holder. `from` is where the spindle is now.
+// Mirrors buildUnloadTool's rack branch with the holder's own geometry.
+function buildProbeUnload(settings, from) {
+  const h = probeHolderPosition(settings);
+  const drawbarBackoff = `
+      G53 G1 Z${h.z + DRAWBAR_OFFSET_MM} F${DRAWBAR_FEEDRATE_MMPM}`;
+  // Same planner sync as buildUnloadTool: M65 is immediate, so wait for the
+  // lift to finish before closing the drawbar.
+  const closeAfterLiftOff = settings.taperBlow ? `
+      G53 G0 Z${h.z + DEDUST_LIFT_MM}
+      G4 P0
+      ${auxLineFor(settings, 'clamp')}
+      G4 P0.5` : '';
+
+  if (h.cup) {
+    return `
+      (probeUnload: routePoint -> holder, drop into cup.)
+      ${probeRoute(from, h.engaged, settings)}
+      G53 G0 Z${h.z}
+      G4 P0.5
+      ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
+      G4 P0.5
+      ${drawbarGuard(settings, 220, 'open', { safeZ: settings.zSafe, returnZ: h.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
+      G53 G0 Z${settings.zSafe}
+      ${toolGuard(settings, 221, 'empty')}
+      M61 Q0
+    `.trim();
+  }
+
+  const feed = probeSlideFeedrate(settings);
+  return `
+    (probeUnload: routePoint -> holder approach, slide into fork.)
+    ${probeRoute(from, h.approach, settings)}
+    G53 G0 Z${h.z}
+    G53 G1 X${h.engaged.x} Y${h.engaged.y} F${feed}
+    G4 P0.5
+    ${auxLineFor(settings, 'unclamp')}${drawbarBackoff}
+    G4 P0.5
+    ${drawbarGuard(settings, 220, 'open', { safeZ: settings.zSafe, returnZ: h.z + DRAWBAR_OFFSET_MM })}${closeAfterLiftOff}
+    G53 G0 Z${settings.zSafe}
+    ${toolGuard(settings, 221, 'empty')}
+    M61 Q0
+  `.trim();
+}
+
+// Pick the probe up from its holder. `entrance` is the routing already
+// worked out by the caller (rack exit when chained after a rack unload,
+// otherwise a routePoint from wherever the spindle is). Mirrors
+// buildLoadTool's rack branch. TLS always follows a probe pickup; the
+// optional verify block runs first so a dead tip is caught before the
+// probe is driven at the toolsetter.
+function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) {
+  const h = probeHolderPosition(settings);
+  const releaseFirst = drawbarAlreadyReleased ? '' : `
+      G4 P0.5
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P0.5
+      ${drawbarGuard(settings, 230, 'open')}`;
+  const approachZ   = h.z + DRAWBAR_OFFSET_MM;
+  const drawbarSeat = `
+      G53 G1 Z${h.z} F${DRAWBAR_FEEDRATE_MMPM}`;
+  const descend = settings.taperBlow ? `
+      G53 G0 Z${h.z + DEDUST_LIFT_MM}
+      G4 P0.1
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P${DEDUST_VENT_SEC}
+      ${drawbarGuard(settings, 230, 'open', { safeZ: settings.zSafe, returnZ: h.z + DEDUST_LIFT_MM })}
+      G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `${releaseFirst}
+      G53 G0 Z${approachZ}`;
+  const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
+  // The controller is told the probe is loaded (M61) as soon as it is
+  // clamped and clear of the holder — before the verification, so a
+  // failed check (alarm, abort) leaves the tool number matching what is
+  // physically in the spindle. Verification runs while the spindle is
+  // still at the holder, before the rise to safe Z (it rises to Verify Z
+  // itself); the rise to safe Z that follows is harmless when the routine
+  // already ended there.
+  const verify = indentBlock(probeVerifyGcode(settings));
+  const toolNumber = settings.probe.toolNumber;
+
+  if (h.cup) {
+    return `
+      (probeLoad: lift out of cup.)
+      ${entrance}${descend}
+      G4 P0.5
+      ${auxLineFor(settings, 'clamp')}${drawbarSeat}
+      G4 P${clampSettle}
+      ${drawbarGuard(settings, 231, 'closed', { safeZ: settings.zSafe, returnZ: h.z })}
+      ${toolGuard(settings, 232, 'present', { safeZ: settings.zSafe, returnZ: h.z })}
+      M61 Q${idOf(toolNumber)}
+      ${verify}
+      G53 G0 Z${settings.zSafe}
+      ${tlsRoutine}
+    `.trim();
+  }
+
+  const feed = probeSlideFeedrate(settings);
+  return `
+    (probeLoad: descend onto probe in fork, slide out.)
+    ${entrance}
+    G53 G0 X${h.engaged.x} Y${h.engaged.y}${descend}
+    G4 P0.5
+    ${auxLineFor(settings, 'clamp')}${drawbarSeat}
+    G4 P${clampSettle}
+    ${drawbarGuard(settings, 231, 'closed', { safeZ: settings.zSafe, returnZ: h.z })}
+    ${toolGuard(settings, 232, 'present', { safeZ: settings.zSafe, returnZ: h.z })}
+    G53 G1 X${h.approach.x} Y${h.approach.y} F${feed}
+    M61 Q${idOf(toolNumber)}
+    ${verify}
+    G53 G0 Z${settings.zSafe}
     ${tlsRoutine}
   `.trim();
 }
@@ -1189,13 +1934,13 @@ function buildManualSwap(settings, toolNumber, tlsRoutine) {
   return `
     G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
     G4 P0
-    (MSG, PLUGIN_PNEUMATICATC:MANUAL_SWAP_TOOL_${toolNumber})
+    (MSG, PLUGIN_PNEUMATICATC:MANUAL_SWAP_TOOL_${idOf(toolNumber)})
     M0
     ${auxLineFor(settings, 'unclamp')}
     M0
     ${auxLineFor(settings, 'clamp')}
     M0
-    M61 Q${toolNumber}
+    M61 Q${idOf(toolNumber)}
     ${tlsRoutine}
   `.trim();
 }
@@ -1215,6 +1960,20 @@ function buildManualSwap(settings, toolNumber, tlsRoutine) {
 function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets = { x: 0, y: 0 }, storedTlo = 0, origin = { x: 0, y: 0 }, options = {}) {
   const sourceSlot = calculateSlotPosition(settings, currentTool);
   const targetSlot = calculateSlotPosition(settings, toolNumber);
+  // Probe auto-loader: the probe's tool number is handled by its own
+  // holder sequences; it is neither a rack slot nor a manual tool.
+  const sourceIsProbe = isProbeTool(settings, currentTool);
+  const targetIsProbe = isProbeTool(settings, toolNumber);
+  const holder = (sourceIsProbe || targetIsProbe) ? probeHolderPosition(settings) : null;
+  // Where the spindle rests after the probe is picked up: at the holder's
+  // centre when the verification ran (it ends there), otherwise where the
+  // pickup itself finished — the slide-out point for a fork, the centre
+  // for a cup. And after a put-down: both styles lift off at the centre.
+  const verifyRuns = !!(settings.probe && settings.probe.verify && settings.probe.verify.enabled);
+  const holderRestXY = holder
+    ? ((verifyRuns || holder.cup) ? holder.engaged : holder.approach)
+    : null;
+  const holderUnloadRestXY = holder ? holder.engaged : null;
   // Probing decision:
   //   'always'  — probe on every M6.
   //   'library' — probe only when the tool has no TLO stored yet
@@ -1226,7 +1985,15 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   //   Reference yet (options.tlrMissing) — the first change after a boot
   //   re-establishes it even for a tool whose TLO is on file.
   const hasStoredTlo = Math.abs(storedTlo || 0) > 0.0001;
+  // The probe follows the same strategy as any tool: with the library
+  // strategy and a TLO on file for its tool number (the Tool Library's
+  // "Probe" slot) the pickup loads the stored offset instead of probing.
+  // A manual tool (numbered above the rack, not the probe) is fitted by hand,
+  // so its stickout differs every time and a stored TLO can't be trusted:
+  // always measure it, whatever the strategy.
+  const targetIsManual = toolNumber > settings.slots && !isProbeTool(settings, toolNumber);
   const shouldProbe = !!options.forceTls
+    || targetIsManual
     || settings.tlsMode === 'always'
     || (settings.tlsMode === 'library' && (!hasStoredTlo || !!options.tlrMissing));
   const returnTo = options.returnTo || origin;
@@ -1245,8 +2012,32 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // routine to skip its own XY approach so we don't emit the redundant
   // edge-hop-back-to-TLS pair.
   const chainedFromRackExit = shouldProbe && isRackSlot;
+  // After a probe pickup the spindle is at the holder, so the toolsetter
+  // approach routes from there rather than from the pre-M6 origin.
+  const tlsRouteFrom = targetIsProbe ? holderRestXY : origin;
+  // Z0 set before a reference by the tool now in the spindle (zeroKeepPlan):
+  // measure that tool first, then let the new tool's measurement keep the Z0.
+  // Without a new tool to measure, fix the reference with the current tool.
+  const keepZero = !!options.keepZero;
+  const keepViaReference = keepZero && toolNumber !== 0 && shouldProbe;
+  // With the library strategy and no reference yet the new tool would be
+  // measured only to re-establish one — but keeping the Z0 already touches
+  // the outgoing tool off. When that touch lands where the library says
+  // (options.libraryIfRefMatches = the outgoing tool's stored TLO) the
+  // library is good for this boot, so the new tool loads its stored TLO.
+  // The touch value only exists on the controller, so the program carries
+  // both endings and the controller picks one (see swapBody below).
+  const refLibTlo = options.libraryIfRefMatches;
+  const branchOnRef = keepViaReference
+    && settings.tlsMode === 'library'
+    && hasStoredTlo
+    && isRackSlot
+    && !targetIsProbe
+    && !targetIsManual
+    && !options.forceTls
+    && typeof refLibTlo === 'number' && Math.abs(refLibTlo) > 0.0001;
   const rawTlsRoutine = shouldProbe
-    ? createToolLengthSetRoutine(settings, toolOffsets, { skipXYApproach: chainedFromRackExit, originMPos: origin }).join('\n')
+    ? createToolLengthSetRoutine(settings, toolOffsets, { skipXYApproach: chainedFromRackExit, originMPos: tlsRouteFrom, mode: branchOnRef ? 'measure' : (keepViaReference ? 'keepRef' : 'normal') }).join('\n')
     : (settings.tlsMode === 'library' && hasStoredTlo
         ? `(Load stored TLO from tool library)\n    G43.1 Z${storedTlo}`
         : '');
@@ -1266,21 +2057,33 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
       && typeof pluginContext !== 'undefined'
       && pluginContext
       && typeof pluginContext.armTlsWriteback === 'function') {
-    try { pluginContext.armTlsWriteback(toolNumber); } catch (_) { /* older host */ }
+    try { pluginContext.armTlsWriteback(idOf(toolNumber)); } catch (_) { /* older host */ }
   }
 
   // Manual → Manual: unload + load happen at the same physical spot,
   // so collapse them into a single dialog+move via buildManualSwap.
   // Otherwise: any unload path — rack or manual — leaves the drawbar
   // released, and a manual load that follows uses the CLAMP dialog.
-  const isManualToManual = currentTool > settings.slots && toolNumber > settings.slots;
-  // A rack unload with the taper blow on re-clamps after lifting off, so
-  // the drawbar is NOT left open for the load that follows.
+  const isManualTool = (n) => n > settings.slots && !isProbeTool(settings, n);
+  const isManualToManual = isManualTool(currentTool) && isManualTool(toolNumber);
+  // A rack (or holder) unload with the taper blow on re-clamps after
+  // lifting off, so the drawbar is NOT left open for the load that follows.
   const rackUnloadReclamped = settings.taperBlow && currentTool > 0 && currentTool <= settings.slots;
-  const drawbarAlreadyReleased = currentTool > 0 && !rackUnloadReclamped;
+  const probeUnloadReclamped = settings.taperBlow && sourceIsProbe;
+  const drawbarAlreadyReleased = currentTool > 0 && !rackUnloadReclamped && !probeUnloadReclamped;
+  // Where the swap starts from. Normally the pre-M6 position; after the
+  // extra touch-off that keeps a Z0 (see zeroKeepPlan) the spindle is at the
+  // toolsetter, so route the unload straight from there instead of driving
+  // back to the job first. The final exit still returns to `returnTo`.
+  const currentOffsets = options.currentOffsets || { x: 0, y: 0, z: 0 };
+  const swapFrom = keepZero
+    ? { x: settings.toolsetter.x + (currentOffsets.x || 0), y: settings.toolsetter.y + (currentOffsets.y || 0) }
+    : origin;
   const unloadSection = isManualToManual
     ? ''
-    : buildUnloadTool(settings, currentTool, sourceSlot, origin);
+    : sourceIsProbe
+      ? buildProbeUnload(settings, swapFrom)
+      : buildUnloadTool(settings, currentTool, sourceSlot, swapFrom);
 
   // Chained rack swap: an unload just placed the machine at the source
   // slot's engaged position at Z-safe. Slot N's engaged sits in the
@@ -1293,14 +2096,32 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     && currentTool > 0
     && currentTool <= settings.slots;
 
-  const loadSection = isManualToManual
-    ? buildManualSwap(settings, toolNumber, tlsRoutine)
-    : buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, origin, chainedFromRack);
+  // Where the spindle is when the load begins: still at the pre-M6 origin
+  // for T0, at the holder after a probe put-down, at the slot after a rack
+  // unload (buildLoadTool handles that chain itself).
+  const loadFrom = sourceIsProbe ? holderUnloadRestXY : swapFrom;
+  let loadSection;
+  if (isManualToManual) {
+    loadSection = buildManualSwap(settings, toolNumber, tlsRoutine);
+  } else if (targetIsProbe) {
+    // Entrance to the holder approach: leave the rack properly when
+    // chained after a rack unload, otherwise route from wherever we are
+    // (origin, or the manual station after a manual unload).
+    const fromXY = isManualTool(currentTool) ? settings.manualTool : swapFrom;
+    const entrance = chainedFromRack
+      ? (settings.rackHolding === 'Cup'
+          ? cupExit(sourceSlot.engaged, holder.approach, settings)
+          : rackExit(sourceSlot.engaged, holder.approach, settings))
+      : probeRoute(fromXY, holder.approach, settings);
+    loadSection = buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased);
+  } else {
+    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack);
+  }
 
   // Tx → T0 leaves the drawbar released after the unload (there is no
   // load section to re-clamp). Restore the fail-safe clamped state so
   // the spindle isn't sitting with the collet open at rest.
-  const finalizeUnclamped = (toolNumber === 0 && unloadSection && !rackUnloadReclamped)
+  const finalizeUnclamped = (toolNumber === 0 && unloadSection && !rackUnloadReclamped && !probeUnloadReclamped)
     ? `G4 P0.5\n    ${auxLineFor(settings, 'clamp')}\n    G4 P0.5`
     : '';
 
@@ -1315,7 +2136,17 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   //   * Otherwise (manual / T0→T0) → leave as-is; existing sequence handles it.
   let exitSection = '';
   const isCup = settings.rackHolding === 'Cup';
-  if (isRackSlot && shouldProbe) {
+  if (targetIsProbe && shouldProbe) {
+    // Probe picked up and measured → spindle is at the toolsetter.
+    exitSection = options.endAtTls ? '' : tlsExit(tlsX, tlsY, returnTo, settings);
+  } else if (targetIsProbe) {
+    // Probe picked up, stored TLO applied, no TLS → spindle is still at the
+    // holder at safe Z. Route home from there, around the rack keepout.
+    exitSection = `(probeExit: routePoint holder -> destination.)\n    ${probeRoute(holderRestXY, returnTo, settings, true)}`;
+  } else if (sourceIsProbe && toolNumber === 0) {
+    // Probe put down, spindle empty at the holder → route home.
+    exitSection = `(probeExit: routePoint holder -> destination.)\n    ${probeRoute(holderUnloadRestXY, returnTo, settings, true)}`;
+  } else if (isRackSlot && shouldProbe) {
     exitSection = options.endAtTls ? '' : tlsExit(tlsX, tlsY, returnTo, settings);
   } else if (toolNumber === 0 && currentTool > 0 && currentTool <= settings.slots) {
     exitSection = isCup
@@ -1327,29 +2158,132 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
       : rackExitToOrigin(targetSlot.engaged, /* isEmpty */ false, returnTo, settings);
   }
 
+  // `returnTo` is operator-chosen, not plugin-computed — the one
+  // destination in this program the plugin cannot vouch for.
+  exitSection = handFinalLegToCoreCheck(exitSection);
+
+  // Retractable rack: extend once, before any motion toward a rack slot;
+  // retract once, after everything is done, including the exit / toolsetter
+  // routing and the final leg — NOT between unload and load, since a chained
+  // Tm→Tn swap par-walks between two rack slots with the rack deployed the
+  // whole time. Either side of the change touching a rack slot is enough; a
+  // pure manual / probe-holder change never needs it. Extend goes in front of
+  // the Z0 carry-over touch-off too, so the whole swap runs with the rack out.
+  const touchesRack = (currentTool > 0 && currentTool <= settings.slots)
+    || (toolNumber > 0 && toolNumber <= settings.slots);
+  const rackExtend = touchesRack ? extendToolRack(settings, 400) : '';
+  const rackRetract = touchesRack ? retractToolRack(settings, 410) : '';
+  // A change that starts from "empty" checks that it really is (see
+  // unexpectedToolGuard). Before the rack extends, so no dialog shows with it out.
+  const unexpectedTool = (currentTool === 0 && toolNumber !== 0)
+    ? unexpectedToolGuard(settings, 250, origin)
+    : '';
+
   const preCmd = settings.preToolChangeGcode?.trim() || '';
   const postCmd = settings.postToolChangeGcode?.trim() || '';
+  // Post Tool Change goes in front of the final leg (see splitFinalLeg).
+  const exitSplit = splitFinalLeg(exitSection);
+  let postAtEnd = !!postCmd;
+
+  // Controller-side choice between the library ending and the measured one
+  // (see branchOnRef). Only g-code lives inside the branches; the `$` host
+  // notification, the Z0 carry-over and the [#] dump that feeds the TLO
+  // writeback run after the endif, for whichever ending ran. On the library
+  // ending that writeback stores the value the tool already had.
+  let exitWithPost = exitSection;
+  if (postCmd && exitSplit.leg) {
+    exitWithPost = `${exitSplit.body}
+    ${postToolChangeThenLeg(postCmd, exitSplit.leg, settings)}`;
+    postAtEnd = false;
+  }
+  let swapBody = `${loadSection}
+    G53 G0 Z${settings.zSafe}
+    ${finalizeUnclamped}
+    ${exitWithPost}`;
+  if (branchOnRef) {
+    const libLoad = buildLoadTool(settings, toolNumber, targetSlot,
+      `(Load stored TLO from tool library)\n    G43.1 Z${storedTlo}`,
+      drawbarAlreadyReleased, loadFrom, chainedFromRack);
+    const libExit = handFinalLegToCoreCheck(isCup
+      ? cupExit(targetSlot.engaged, returnTo, settings)
+      : rackExitToOrigin(targetSlot.engaged, /* isEmpty */ false, returnTo, settings));
+    // Both endings finish with the same final leg to returnTo. Keep it, and
+    // Post Tool Change, out of the branches and run them after the endif:
+    // grblHAL executes `$` lines even inside the branch it skips, and the
+    // event is the operator's own g-code.
+    const libSplit = splitFinalLeg(libExit);
+    const shareLeg = !!postCmd && !!exitSplit.leg && libSplit.leg.trim() === exitSplit.leg.trim();
+    const libEnding = shareLeg ? libSplit.body : libExit;
+    const measuredEnding = shareLeg ? exitSplit.body : exitSection;
+    postAtEnd = !!postCmd && !shareLeg;
+    swapBody = `#<_nc_lib_ok> = [ABS[#<_nc_ref_tlo> - [${refLibTlo}]] LT ${REF_MATCH_TOLERANCE_MM}]
+    o7101 if [#<_nc_lib_ok>]
+    (T${idOf(currentTool)} touched off where the library says: load T${idOf(toolNumber)} from the library)
+    ${libLoad}
+    G53 G0 Z${settings.zSafe}
+    ${libEnding}
+    o7101 else
+    (T${idOf(currentTool)} touched off away from its library value: measure T${idOf(toolNumber)})
+    ${loadSection}
+    G53 G0 Z${settings.zSafe}
+    ${measuredEnding}
+    o7101 endif
+    (Notify ncSender that toolLengthSet is now set)
+    $#=_tool_offset
+    #<_ofs_idx> = [#5220 * 20 + 5203]
+    #<_cur_wcs_z_ofs> = #[#<_ofs_idx>]
+    (Keep the Z0 that was set with the previous tool)
+    G10 L2 P[#5220] Z[#<_cur_wcs_z_ofs> - #<_nc_ref_tlo>]
+    (Trigger a full [#] dump so ncSender receives [TLO:xxx] for writeback)
+    $#${shareLeg ? `
+    ${postToolChangeThenLeg(postCmd, exitSplit.leg, settings)}` : ''}`;
+  }
+
+  // Out to the toolsetter; the unload below routes on from there (swapFrom).
+  const zeroKeepSection = keepZero
+    ? `(Measure T${idOf(currentTool)} first: it set Z0 before a tool length reference existed)
+    (MSG, ZERO_KEEP_START T${idOf(currentTool)})
+    ${createToolLengthSetRoutine(settings, currentOffsets, { originMPos: origin, mode: keepViaReference ? 'reference' : 'keepSelf' }).join('\n')}
+    G53 G0 Z${settings.zSafe}
+    (MSG, ZERO_KEEP_END)`
+    : '';
 
   const gcode = `
     (Start of PneumaticATC Plugin Sequence)
-    ${preCmd}
+    ${modalSafe(preCmd, 'pre')}
     #<return_units> = [20 + #<_metric>]
     G21
     M5
+    ${sienciKeepout(settings).off}
     ${pressureGuard(settings, 120)}
     G53 G0 Z${settings.zSafe}
+    ${unexpectedTool}
+    ${rackExtend}
+    ${zeroKeepSection}
     ${unloadSection}
-    ${loadSection}
-    G53 G0 Z${settings.zSafe}
-    ${finalizeUnclamped}
-    ${exitSection}
+    ${swapBody}
+    ${rackRetract}
     G4 P0
+    ${sienciKeepout(settings).on}
     G[#<return_units>]
-    ${postCmd}
+    ${postAtEnd ? modalSafe(postCmd, 'post') : ''}
     (End of PneumaticATC Plugin Sequence)
   `.trim();
 
   return formatGCode(gcode);
+}
+
+// Sienci's grblHAL build has its own keepout zone around the rack (turned
+// on and off with M960 P1 / M960 P0) and alarms when the ATC moves into it.
+// With the Sienci profile the plugin turns it off before any move into the
+// rack and back on when the change is done, so users don't have to add
+// those lines to the Pre/Post Tool Change events themselves.
+function sienciKeepout(settings) {
+  const on = settings.atcProfile === 'sienci';
+  return {
+    off: on ? 'M960 P0 (Sienci keepout off for the rack)' : '',
+    on:  on ? 'M960 P1 (Sienci keepout back on)' : '',
+  };
 }
 
 // === Command handlers ===
@@ -1394,7 +2328,10 @@ function handleTLSCommand(commands, context, settings) {
   const originMPos = (mpos && typeof mpos.x === 'number' && typeof mpos.y === 'number')
     ? { x: mpos.x, y: mpos.y }
     : undefined;
-  const program = createToolLengthSetProgram(settings, toolOffsets, { originMPos });
+  const program = createToolLengthSetProgram(settings, toolOffsets, {
+    originMPos,
+    mode: zeroKeepPlan(context, currentTool).keep ? 'keepSelf' : 'normal',
+  });
   expandIntoCommands(commands, idx, commands[idx].command, program, settings);
 }
 
@@ -1435,6 +2372,9 @@ function handleMeasureTloCommand(commands, context, settings) {
   const req = parseMeasureTloCommand(commands[idx].command);
   const toolNumber = req.toolNumber;
   const currentTool = context.machineState?.tool ?? 0;
+  _physToId = new Map();
+  const physTarget = toPhysical(toolNumber, settings, context.tools);
+  const physCurrent = toPhysical(currentTool, settings, context.tools);
   const origin = {
     x: context.machineState?.mpos?.x ?? 0,
     y: context.machineState?.mpos?.y ?? 0,
@@ -1449,63 +2389,24 @@ function handleMeasureTloCommand(commands, context, settings) {
         && typeof pluginContext.armTlsWriteback === 'function') {
       try { pluginContext.armTlsWriteback(currentTool); } catch (_) { /* older host */ }
     }
-    program = createToolLengthSetProgram(settings, toolOffsets, { originMPos: origin });
+    program = createToolLengthSetProgram(settings, toolOffsets, {
+      originMPos: origin,
+      mode: zeroKeepPlan(context, currentTool).keep ? 'keepSelf' : 'normal',
+    });
   } else if (toolNumber > 0) {
     const toolOffsets = getToolProbeOffsets(toolNumber, context.tools);
     const storedTlo = getStoredTlo(toolNumber, context.tools);
-    program = buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets, storedTlo, origin,
-      { forceTls: true, endAtTls: true });
+    program = buildToolChangeProgram(settings, physCurrent, physTarget, toolOffsets, storedTlo, origin,
+      { forceTls: true, endAtTls: true,
+        keepZero: zeroKeepPlan(context, currentTool).keep,
+        currentOffsets: getToolProbeOffsets(currentTool, context.tools) });
   } else {
-    program = buildToolChangeProgram(settings, currentTool, 0, { x: 0, y: 0 }, 0, origin,
+    program = buildToolChangeProgram(settings, physCurrent, 0, { x: 0, y: 0 }, 0, origin,
       { returnTo: req.returnTo || origin });
   }
   expandIntoCommands(commands, idx, commands[idx].command, program, settings);
 }
 
-function handleHomeCommand(commands, context, settings) {
-  const idx = commands.findIndex((c) => c.isOriginal && c.command.trim().toUpperCase() === '$H');
-  if (idx === -1) return;
-  if (!settings.performTlsAfterHome) return;
-
-  const currentTool = context.machineState?.tool ?? 0;
-  const toolOffsets = getToolOffsets(currentTool, context.tools);
-  // Machine origin, NOT the current position.
-  //
-  // This runs while the command is being expanded, which is *before* the $H
-  // below has executed — so context.machineState.mpos is wherever the spindle
-  // happens to be sitting now, in a coordinate frame homing is about to throw
-  // away. Anchoring the approach there produced absolute `G53 G0` waypoints
-  // computed in the old frame: harmless when the machine was already homed and
-  // near zero, a travel-limit error after a $REBOOT and a jog, where the
-  // pre-home reading can be anything at all.
-  //
-  // The routine runs after $H completes, when the spindle is at machine origin
-  // — which is what the rest of this program already assumes, ending as it does
-  // with `G53 G0 X0 Y0`.
-  const originMPos = { x: 0, y: 0 };
-  const tlsRoutine = createToolLengthSetRoutine(settings, toolOffsets, { originMPos }).join('\n');
-  const tlsExitMove = createToolLengthSetExitMove(settings, toolOffsets, { originMPos });
-  const preCmd = settings.preToolChangeGcode?.trim() || '';
-  const postCmd = settings.postToolChangeGcode?.trim() || '';
-
-  const gcode = `
-    $H
-    #<return_units> = [20 + #<_metric>]
-    o100 IF [[#<_tool_offset> EQ 0] AND [#<_current_tool> NE 0]]
-      ${preCmd}
-      G21
-      ${tlsRoutine}
-      G53 G0 Z${settings.zSafe}
-      ${tlsExitMove}
-      G4 P0
-      G53 G0 X0 Y0
-      ${postCmd}
-    o100 ENDIF
-    G[#<return_units>]
-  `.trim();
-  const program = formatGCode(gcode);
-  expandIntoCommands(commands, idx, commands[idx].command, program, settings);
-}
 
 // Manual $slotN navigation. Routes through the same keepout-safe
 // entrance used by tool change (buildLoadTool / buildUnloadTool). A
@@ -1518,8 +2419,16 @@ function buildSlotNav(settings, slotNum, origin = { x: 0, y: 0 }) {
     ? cupEntrance(engaged, origin, settings)
     : `${rackEntrance(engaged, origin, settings)}
        G53 G0 X${engaged.x} Y${engaged.y}`;
+  // Parks in the rack, so the Sienci keepout is only turned off here; the
+  // next tool change turns it back on when it finishes.
+  // Extend before jogging over the slot — same reasoning as the M6 path. No
+  // retract afterward: the operator jogged here deliberately (setup /
+  // inspection) and likely wants to stay, unlike a tool change where the rack
+  // has to be clear again before the job resumes.
   return `
     G53 G21 G90 G0 Z${settings.zSafe}
+    ${extendToolRack(settings, 420)}
+    ${sienciKeepout(settings).off}
     ${entrance}
   `.trim();
 }
@@ -1558,6 +2467,9 @@ function handleM6Command(commands, context, settings) {
   if (!parsed?.matched || parsed.toolNumber === null) return;
   const toolNumber = parsed.toolNumber;
   const currentTool = context.machineState?.tool ?? 0;
+  _physToId = new Map();
+  const physTarget = toPhysical(toolNumber, settings, context.tools);
+  const physCurrent = toPhysical(currentTool, settings, context.tools);
   const toolOffsets = getToolProbeOffsets(toolNumber, context.tools);
   const storedTlo = getStoredTlo(toolNumber, context.tools);
   // Pre-M6 machine XY snapshot — rack routing branches on this at
@@ -1571,7 +2483,16 @@ function handleM6Command(commands, context, settings) {
   // Older hosts don't expose toolLengthSet at all (undefined) — only a
   // definite `false` means "no reference"; otherwise trust the library.
   const tlrMissing = context.machineState?.toolLengthSet === false;
-  const program = buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets, storedTlo, origin, { tlrMissing });
+  // Only a rack or probe tool's library TLO says anything about this boot; a
+  // hand-fitted manual tool's stickout changes every time.
+  const currentIsTrusted = physCurrent > 0
+    && (physCurrent <= settings.slots || isProbeTool(settings, physCurrent));
+  const program = buildToolChangeProgram(settings, physCurrent, physTarget, toolOffsets, storedTlo, origin, {
+    tlrMissing,
+    keepZero: zeroKeepPlan(context, currentTool).keep,
+    currentOffsets: getToolProbeOffsets(currentTool, context.tools),
+    libraryIfRefMatches: currentIsTrusted ? getStoredTlo(currentTool, context.tools) : undefined,
+  });
   expandIntoCommands(commands, idx, commands[idx].command, program, settings);
 }
 
@@ -1630,7 +2551,6 @@ function onBeforeCommand(commands, context, settings) {
     settings.zSafe = context.safeZHeight;
   }
   gateSpindleUnclamp(commands, context, settings);
-  handleHomeCommand(commands, context, settings);
   handleTLSCommand(commands, context, settings);
   handleMeasureTloCommand(commands, context, settings);
   handleSlotCommand(commands, context, settings);
@@ -1639,7 +2559,7 @@ function onBeforeCommand(commands, context, settings) {
 }
 
 export {
-  onBeforeCommand, buildInitialConfig,
+  onBeforeCommand, buildInitialConfig, probeVerifyRoutine, probeVerifyGcode,
   rackEntrance, rackExit, cupEntrance, cupExit, tlsEntrance, tlsExit,
   computeKeepoutZone, slotEntryPoint, slotApproachPoint,
   buildLoadTool, buildUnloadTool, buildSlotNav, calculateSlotPosition,

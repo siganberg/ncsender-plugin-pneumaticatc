@@ -48,6 +48,8 @@ import {
   createToolLengthSetProgram,
   routePoint,
   pickEntryEdge,
+  probeVerifyRoutine,
+  probeVerifyGcode,
 } from './commands.js';
 
 // Strip comment lines and blank lines so the assertions read against
@@ -567,7 +569,7 @@ describe('tlsExit (.117 kiosk Cup): TLS + origin both inside perp band on opposi
 });
 
 // Standalone $TLS approach. createToolLengthSetRoutine runs before every
-// probe cycle — via $TLS, via M6, via $H+performTlsAfterHome. It didn't
+// probe cycle — via $TLS or via M6. It didn't
 // know about the keepout: a single `G53 G0 X{tlsX} Y{tlsY}` from wherever
 // the spindle sat could cut diagonally across occupied slot columns on
 // the way in. Fix mirrors rackExit — if TLS sits inside the padded rack
@@ -1680,53 +1682,6 @@ describe('routePoint — direct primitive scenarios', () => {
 
 
 // ---------------------------------------------------------------------------
-// $H + performTlsAfterHome must anchor on machine origin, not on wherever the
-// spindle happened to be sitting when the command was expanded.
-//
-// Reported from the shop: $REBOOT, jog clear of the keepout, then $H with
-// "perform TLS after home" on. Homing succeeded, the TLS ran, and the machine
-// then threw a travel-limit error. Expansion happens BEFORE $H executes, so the
-// approach was being routed from the pre-home reading — a coordinate in a frame
-// homing was about to redefine — and the waypoints are emitted as absolute
-// `G53 G0` moves, so they landed outside travel. It only looked fine when the
-// machine was already homed and sitting near zero.
-// ---------------------------------------------------------------------------
-describe('$H + performTlsAfterHome — routed from machine origin', () => {
-  const SETTINGS = buildInitialConfig({
-    slots: 3,
-    orientation: 'Y',
-    direction: 'Positive',
-    slot1: { x: -115, y: 40 },
-    slotDistance: 80,
-    slideDirection: 'Positive',
-    performTlsAfterHome: true,
-    tls: { x: -115, y: 400 },
-  });
-
-  const expand = (mpos) => {
-    const commands = [{ isOriginal: true, command: '$H' }];
-    onBeforeCommand(commands, {
-      machineState: { tool: 1, mpos },
-      tools: [{ number: 1, tlsBias: 0 }],
-    }, { ...SETTINGS });
-    return commands.map((c) => c.command).join('\n');
-  };
-
-  test('a far pre-home position does not leak into the approach', () => {
-    // Same rack, two wildly different pre-home readings. If either leaks in,
-    // the emitted G53 targets differ — which is the bug.
-    const nearZero = expand({ x: 0, y: 0 });
-    const farAway  = expand({ x: -812.5, y: 1234.75 });
-    assert.equal(farAway, nearZero,
-      'approach must not depend on the pre-home machine position');
-  });
-
-  test('no waypoint references the stale coordinate', () => {
-    const gcode = expand({ x: -812.5, y: 1234.75 });
-    assert.ok(!gcode.includes('-812.5'), 'stale X leaked into the program');
-    assert.ok(!gcode.includes('1234.75'), 'stale Y leaked into the program');
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Air-pressure read placement. Sienci reads pressure once, before the change
@@ -1782,10 +1737,14 @@ describe('taperBlow — Sienci-style drawbar handling around the traverse', () =
     const lines = buildUnloadTool(on, 1, calculateSlotPosition(on, 1), { x: 0, y: 0 }).split('\n').map((l) => l.trim());
     const lift = lines.findIndex((l) => l === 'G53 G0 Z-80');
     assert.ok(lift > 0, 'expected a lift to slot Z + 20');
-    assert.match(lines[lift + 1], /^M6[45] P1$/);
-    assert.notEqual(auxOf(lines[lift + 1]), auxOf(lines.find((l) => /^M6[45] P1$/.test(l))), 'the aux after lift-off must be the clamp, i.e. the opposite of the release');
+    // M65 acts the moment the line is read, so a G4 P0 must hold it back until
+    // the lift has actually finished; without it the drawbar closed on the
+    // tool just released.
+    assert.equal(lines[lift + 1], 'G4 P0', 'planner sync between the lift and the clamp');
+    assert.match(lines[lift + 2], /^M6[45] P1$/);
+    assert.notEqual(auxOf(lines[lift + 2]), auxOf(lines.find((l) => /^M6[45] P1$/.test(l))), 'the aux after lift-off must be the clamp, i.e. the opposite of the release');
     const safe = lines.findIndex((l) => l === 'G53 G0 Z-5');
-    assert.ok(safe > lift + 1, 'the clamp happens before the rapid to Z-safe');
+    assert.ok(safe > lift + 2, 'the clamp happens before the rapid to Z-safe');
   });
 
   test('off: the unload leaves the drawbar open and goes straight to Z-safe', () => {
@@ -1795,8 +1754,11 @@ describe('taperBlow — Sienci-style drawbar handling around the traverse', () =
   });
 
   test('on: the load re-opens above the holder, vents 0.8 s, feeds down at 1500 and settles 1 s after clamping', () => {
+    // Blank lines are dropped before the program reaches the controller
+    // (a disabled sensor guard interpolates to ''), so drop them here too —
+    // this test is about which real lines sit next to each other.
     const lines = buildLoadTool(on, 2, calculateSlotPosition(on, 2), '', /* alreadyReleased */ false, { x: 0, y: 0 }, /* chained */ true)
-      .split('\n').map((l) => l.trim());
+      .split('\n').map((l) => l.trim()).filter((l) => l !== '');
     const i = lines.findIndex((l) => l === 'G53 G0 Z-80');
     assert.ok(i > 0, 'expected a rapid to slot Z + 20 above the holder');
     assert.equal(lines[i + 1], 'G4 P0.1');
@@ -1956,5 +1918,1315 @@ describe('$MEASURE_TLO — measure-all batch step', () => {
     assert.ok(lines.some((l) => /^M61 Q0$/.test(l)), 'unloads');
     assert.equal(lines.filter((l) => /^G53 G0 X406\.3 Y-489\.287$/.test(l)).length, 1, 'ends at the requested XY');
     assert.ok(!lines.some((l) => /^G38\.2/.test(l)), 'no probe on the way out');
+  });
+});
+
+describe('probe auto-loader config', () => {
+  test('fork fields default from the rack and its slide axis', () => {
+    const cfg = buildInitialConfig({ slots: 6, orientation: 'Y', slideDirection: 'Positive', slideDistance: 35, slideSpeed: 900 });
+    assert.equal(cfg.probe.holding, 'Fork');
+    assert.equal(cfg.probe.slideAxis, 'X');            // rack along Y slides along X
+    assert.equal(cfg.probe.slideDirection, 'Positive');
+    assert.equal(cfg.probe.slideDistance, 35);
+    assert.equal(cfg.probe.slideSpeed, 900);
+    assert.equal(cfg.probe.toolNumber, 99);
+  });
+
+  test('fork fields set on the probe win over the rack', () => {
+    const cfg = buildInitialConfig({
+      slots: 6, orientation: 'Y', slideDirection: 'Positive', slideDistance: 35, slideSpeed: 900,
+      probe: { enabled: true, toolNumber: 20, holding: 'Fork', slideAxis: 'Y', slideDirection: 'Negative', slideDistance: 25, slideSpeed: 400 }
+    });
+    assert.equal(cfg.probe.enabled, true);
+    assert.equal(cfg.probe.toolNumber, 20);
+    assert.equal(cfg.probe.slideAxis, 'Y');
+    assert.equal(cfg.probe.slideDirection, 'Negative');
+    assert.equal(cfg.probe.slideDistance, 25);
+    assert.equal(cfg.probe.slideSpeed, 400);
+  });
+
+  test('probe tool number is clamped above the rack', () => {
+    const cfg = buildInitialConfig({ slots: 8, probe: { toolNumber: 3 } });
+    assert.equal(cfg.probe.toolNumber, 9);
+  });
+});
+
+describe('probe auto-loader — tool change programs', () => {
+  // Rack along Y at X=-115 (keepout X -175..-55, Y -20..260). Probe holder
+  // sits well clear of it at (200, -100), fork slides along X.
+  const base = () => buildInitialConfig({
+    ...RACK,
+    slot1: { x: -115, y: 40, z: -120 },
+    zSafe: -5, clampAuxOutput: 0,
+    toolsetter: { x: 300, y: 300 },
+    manualTool: { x: 500, y: 500 },
+    tlsMode: 'library',
+    probe: { enabled: true, toolNumber: 99, holding: 'Fork', slideAxis: 'X', slideDirection: 'Negative',
+             slideDistance: 30, slideSpeed: 700, x: 200, y: -100, z: -90, verifyGcode: 'G38.3 G91 Z-2 F100\nG90' }
+  });
+  const origin = { x: 0, y: 0 };
+
+  test('T0 → probe (fork): slide out of the holder, verify, then always TLS', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin);
+    const lines = motionLines(prog.join('\n'));
+    const text = lines.join('\n');
+    // Descends onto the probe at the holder, clamps, slides to the approach
+    // (X 230 = 200 - (-1 * 30)) at the probe's own feed, lifts.
+    assert.ok(text.includes('G53 G0 X200 Y-100'), 'moves over the holder engaged point');
+    assert.ok(text.includes('G53 G0 Z-89'), 'approach height is holder Z + drawbar offset');
+    assert.ok(text.includes('G53 G1 Z-90 F300'), 'drawbar seat to holder Z');
+    assert.ok(text.includes('G53 G1 X230 Y-100 F700'), 'slides out along +X at the probe slide speed');
+    assert.ok(text.includes('M61 Q99'), 'controller told the probe is loaded');
+    assert.ok(text.includes('G38.3 G91 Z-2 F100'), 'verify block runs after pickup');
+    // Library strategy with a TLO on file for T99: no TLS, the stored offset is loaded.
+    assert.ok(!text.includes('G38.2 G91 Z-'), 'library strategy with a stored TLO skips TLS for the probe too');
+    assert.ok(text.includes('G43.1 Z12.345'), 'stored TLO is applied');
+    assert.ok(text.indexOf('G38.3 G91 Z-2 F100') < text.indexOf('G43.1 Z12.345'), 'verify precedes the offset load');
+    assert.ok(text.indexOf('M61 Q99') < text.indexOf('G38.3 G91 Z-2 F100'), 'tool number is set before the verification');
+    assert.ok(text.includes('MANUAL_') === false, 'no manual-tool dialog for the probe');
+  });
+
+  test('T0 → probe with no stored TLO (library) or with the always strategy: TLS runs', () => {
+    const noTlo = buildToolChangeProgram(base(), 0, 99, { x: 0, y: 0, z: 0 }, 0, origin).join('\n');
+    assert.ok(noTlo.includes('G38.2 G91 Z-'), 'no TLO on file → probe it');
+    const always = base(); always.tlsMode = 'always';
+    const alwaysText = buildToolChangeProgram(always, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin).join('\n');
+    assert.ok(alwaysText.includes('G38.2 G91 Z-'), 'always strategy → probe it');
+  });
+
+  test('T0 → probe with a stored TLO: the exit routes from the holder, not the toolsetter', () => {
+    // The field failure: with the library strategy and a TLO on file the
+    // pickup skips TLS, so the spindle is still at the holder — the old
+    // exit assumed the toolsetter and dragged the probe across the rack.
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin).join('\n');
+    const tlo = prog.indexOf('G43.1 Z12.345');
+    const tail = prog.slice(tlo);
+    assert.ok(tail.includes('probeExit'), 'exit is computed from the holder');
+    assert.ok(!tail.includes('tlsExit'), 'no toolsetter exit without a TLS');
+    assert.ok(!tail.includes('X300 Y300'), 'never heads for the toolsetter');
+    assert.ok(tail.trim().includes('G53 G0 X0 Y0'), 'ends at the origin');
+  });
+
+  test('T0 → probe with TLS: the exit leaves the toolsetter', () => {
+    const cfg = base(); cfg.tlsMode = 'always';
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 12.345, origin).join('\n');
+    assert.ok(prog.slice(prog.indexOf('G43.1 Z[')).includes('tlsExit'));
+  });
+
+  test('probe → T0 (cup): drop into the holder, re-clamp, route home', () => {
+    const cfg = base();
+    cfg.probe.holding = 'Cup';
+    const prog = buildToolChangeProgram(cfg, 99, 0, { x: 0, y: 0, z: 0 }, 0, origin);
+    const text = motionLines(prog.join('\n')).join('\n');
+    assert.ok(text.includes('G53 G0 X200 Y-100'), 'routes to the cup');
+    assert.ok(text.includes('G53 G0 Z-90'), 'drops to the holder Z');
+    assert.ok(text.includes('G53 G1 Z-89 F300'), 'drawbar back-off after release');
+    assert.ok(text.includes('M61 Q0'));
+    assert.ok(!text.includes('G1 X') || !text.includes('F700'), 'no fork slide for a cup holder');
+    assert.ok(!text.includes('G38.2'), 'no TLS on a put-down');
+    assert.ok(text.trim().endsWith('G[#<return_units>]') || text.includes('G53 G0 X0 Y0'), 'returns toward the origin');
+  });
+
+  test('T1 → probe: rack unload chains into a rack exit toward the holder', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 1, 99, { x: 0, y: 0, z: 0 }, 0, origin);
+    const text = motionLines(prog.join('\n')).join('\n');
+    const unloadIdx = text.indexOf('M61 Q0');
+    const loadIdx = text.indexOf('M61 Q99');
+    assert.ok(unloadIdx !== -1 && loadIdx !== -1 && unloadIdx < loadIdx, 'unload then load');
+    // Leaves the rack via its sliding-side edge (X -55) before heading to the holder.
+    assert.ok(text.slice(unloadIdx, loadIdx).includes('G53 G0 X-55'), 'rack exit to the sliding edge');
+    assert.ok(text.includes('G53 G1 X230 Y-100 F700'));
+  });
+
+  test('probe → T2: put the probe down, then a normal rack load from the holder', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 99, 2, { x: 0, y: 0, z: 0 }, 0, origin);
+    const text = motionLines(prog.join('\n')).join('\n');
+    assert.ok(text.indexOf('M61 Q0') < text.indexOf('M61 Q2'));
+    assert.ok(text.includes('G53 G1 X200 Y-100 F700'), 'slides into the fork to put the probe down');
+    assert.ok(text.includes('rackEntrance') === false, 'comments stripped');
+    assert.ok(text.includes('G53 G0 X-115 Y120'), 'ends up over slot 2');
+  });
+
+  test('probe is not treated as a manual tool when swapping with one', () => {
+    const cfg = base();
+    const prog = buildToolChangeProgram(cfg, 99, 5, { x: 0, y: 0, z: 0 }, 0, origin);
+    // The dialog markers are (MSG, …) comment lines, so read the raw program.
+    const text = prog.join('\n');
+    assert.ok(!text.includes('MANUAL_SWAP_TOOL'), 'not collapsed into a manual swap');
+    assert.ok(text.includes('MANUAL_CLAMP_TOOL_5'), 'manual load dialog still shows for the manual tool');
+  });
+
+  test('disabled loader: the probe number is an ordinary manual tool', () => {
+    const cfg = base();
+    cfg.probe.enabled = false;
+    const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 0, origin);
+    assert.ok(prog.join('\n').includes('MANUAL_CLAMP_TOOL_99'));
+  });
+});
+
+describe('probe verification (simple / advanced)', () => {
+  const cfg = () => buildInitialConfig({
+    slots: 3, zSafe: -5, clampAuxOutput: 0,
+    probe: { enabled: true, toolNumber: 99, x: 200, y: -100, z: -90, verify: { enabled: true, mode: 'simple', z: -70 } }
+  });
+
+  test('simple mode: rise to Verify Z, centre, sideways touch, centre, safe Z', () => {
+    const lines = probeVerifyGcode(cfg()).split('\n').filter((l) => !l.startsWith('('));
+    assert.deepEqual(lines, [
+      'G53 G0 Z-70',
+      'G53 G0 X200 Y-100',
+      'G38.2 G91 X-12 F150',      // fork slides along X, Negative → toward the holder
+      'G90',
+      'G53 G0 X200 Y-100',
+      'G53 G0 Z-5',
+    ]);
+  });
+
+  test('simple mode follows the holder slide axis and direction', () => {
+    const c = cfg(); c.probe.slideAxis = 'Y'; c.probe.slideDirection = 'Positive';
+    assert.ok(probeVerifyGcode(c).includes('G38.2 G91 Y12 F150'));
+  });
+
+  test('advanced mode uses the operator text verbatim', () => {
+    const c = cfg(); c.probe.verify.mode = 'advanced'; c.probe.verify.gcode = 'G38.3 G91 Z-2 F100\nG90';
+    assert.equal(probeVerifyGcode(c), 'G38.3 G91 Z-2 F100\nG90');
+  });
+
+  test('disabled verification emits nothing', () => {
+    const c = cfg(); c.probe.verify.enabled = false;
+    assert.equal(probeVerifyGcode(c), '');
+  });
+
+  test('legacy verifyGcode migrates to advanced; empty legacy means off', () => {
+    const on = buildInitialConfig({ slots: 3, probe: { enabled: true, z: -90, verifyGcode: 'G4 P1' } });
+    assert.equal(on.probe.verify.mode, 'advanced');
+    assert.equal(on.probe.verify.enabled, true);
+    assert.equal(on.probe.verify.gcode, 'G4 P1');
+    const off = buildInitialConfig({ slots: 3, probe: { enabled: true, z: -90, verifyGcode: '' } });
+    assert.equal(off.probe.verify.enabled, false);
+    assert.equal(off.probe.verify.z, -70, 'defaults 20 mm above the holder');
+  });
+
+  test('the routine is spliced between M61 and TLS on a pickup', () => {
+    const c = buildInitialConfig({ slots: 3, orientation: 'Y', slot1: { x: -115, y: 40, z: -120 }, slotDistance: 80,
+      slideDirection: 'Negative', slideDistance: 40, keepoutPadding: 60, zSafe: -5, clampAuxOutput: 0,
+      toolsetter: { x: 300, y: 300 }, tlsMode: 'always',
+      probe: { enabled: true, toolNumber: 99, x: 200, y: -100, z: -90, slideAxis: 'X', slideDirection: 'Negative', slideDistance: 30, slideSpeed: 700,
+               verify: { enabled: true, mode: 'simple', z: -70 } } });
+    const text = buildToolChangeProgram(c, 0, 99, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }).join('\n');
+    const slideOut = text.indexOf('G53 G1 X230 Y-100'), verify = text.indexOf('G38.2 G91 X-12 F150');
+    const m61 = text.indexOf('M61 Q99'), tls = text.indexOf('G43.1 Z0');
+    assert.ok(slideOut !== -1 && slideOut < m61 && m61 < verify && verify < tls, 'slide out → M61 → verify → TLS');
+    // No rise to safe Z between the slide-out and the verify's own rise to Verify Z.
+    assert.ok(!text.slice(slideOut, verify).includes('G53 G0 Z-5'), 'goes to Verify Z straight from the holder');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The final exit leg must keep its keepout check.
+//
+// Every G53 leg this plugin emits is rack routing it computed itself, so it
+// opts out of the core's keepout check with `$keepout_off` — the rack slots
+// genuinely sit inside the published zone. The exception is the LAST leg:
+// it ends at `returnTo`, which is wherever the operator left the spindle
+// when they typed M6. Cancel a tool load and that is a point inside the
+// rack, and a blanket opt-out drove the spindle back into the studs.
+//
+// These pin both halves: rack routing still opts out, the final leg does
+// not, and the marker that arranges it never reaches the controller.
+// ---------------------------------------------------------------------------
+describe('final exit leg is left for the core keepout check', () => {
+  const settings = buildInitialConfig({
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5,
+    clampAuxOutput: 1,
+  });
+
+  // Drives a real M6 through onBeforeCommand so the Pro edition marker is
+  // set — the prefix is Pro-only, and buildToolChangeProgram alone would
+  // not exercise it.
+  const runM6 = (tool, mpos) => {
+    const commands = [{ command: 'M6 T1', isOriginal: true }];
+    onBeforeCommand(commands, { edition: 'pro', machineState: { tool, mpos }, tools: [] }, { ...settings });
+    return commands.map((c) => c.command.trim());
+  };
+
+  test('rack routing still opts out, but the last G53 leg does not', () => {
+    const lines = runM6(0, { x: 10, y: 20 });
+    const machineMoves = lines.filter((l) => /(^|[^A-Z])G0*53(?:[^0-9]|$)/i.test(l));
+    assert.ok(machineMoves.length > 1, 'expected several G53 legs in a tool change');
+
+    const lastMove = machineMoves[machineMoves.length - 1];
+    assert.doesNotMatch(lastMove, /\$keepout_off/,
+      `the final leg must stay checked, got: ${lastMove}`);
+
+    const earlier = machineMoves.slice(0, -1);
+    assert.ok(earlier.some((l) => /\$keepout_off/.test(l)),
+      'rack routing must still carry the opt-out');
+  });
+
+  test('the marker never reaches the controller', () => {
+    const lines = runM6(0, { x: 10, y: 20 });
+    assert.ok(!lines.some((l) => l.includes('ncs-checked')),
+      'the internal marker must be stripped before dispatch');
+  });
+
+  test('a non-Pro core gets no prefix at all and no marker', () => {
+    const commands = [{ command: 'M6 T1', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 0, mpos: { x: 10, y: 20 } }, tools: [] }, { ...settings });
+    const lines = commands.map((c) => c.command.trim());
+    assert.ok(!lines.some((l) => l.includes('$keepout_off')));
+    assert.ok(!lines.some((l) => l.includes('ncs-checked')));
+  });
+});
+
+// === Drawbar + tool-in-spindle sensor guards =============================
+//
+// Both are off unless a pin is configured, and when on they must land in the
+// one ordering that makes them worth having: every check sits BEFORE the move
+// that would depend on it. The fork slide-out is the sharp case — sliding
+// sideways with a tool the drawbar never gripped drags it out of the fork.
+describe('sensor guards — drawbar and tool-in-spindle', () => {
+  const sensed = (extra) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80,
+    clampAuxOutput: 1, rackHolding: 'Fork', ...extra
+  });
+  const lines = (g) => g.split('\n').map((l) => l.trim()).filter(Boolean);
+  const idx = (ls, re) => ls.findIndex((l) => re.test(l));
+
+  test('no pins configured: not a single M66 and no sensor dialog', () => {
+    const s = sensed({});
+    assert.equal(s.drawbarInput, -1);
+    assert.equal(s.toolSensorInput, -1);
+    for (const g of [
+      buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }),
+      buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false)
+    ]) {
+      assert.doesNotMatch(g, /M66/);
+      assert.doesNotMatch(g, /DRAWBAR_FAILED|TOOL_FAILED_TO_SEAT|TOOL_STILL_GRIPPED/);
+    }
+  });
+
+  // An unsanitized settings object (old stored config, or a raw test fixture)
+  // leaves these undefined. `undefined < 0` is false, so a naive check would
+  // emit `M66 Pundefined` into a live tool change.
+  test('undefined pins are treated as absent, never emitted as a pin number', () => {
+    const raw = { ...sensed({}) };
+    delete raw.drawbarInput;
+    delete raw.toolSensorInput;
+    const g = buildUnloadTool(raw, 1, calculateSlotPosition(raw, 1), { x: 0, y: 0 });
+    assert.doesNotMatch(g, /undefined/);
+    assert.doesNotMatch(g, /M66/);
+  });
+
+  test('unload: drawbar must read open after the release, spindle empty after the lift', () => {
+    const s = sensed({ drawbarInput: 3, toolSensorInput: 5 });
+    const ls = lines(buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }));
+    const release = idx(ls, /^M64 P1$/);
+    const dbRead  = idx(ls, /^M66 P3 L4 Q/);
+    const lift    = idx(ls, /^G53 G0 Z0$/);
+    const tisRead = idx(ls, /^M66 P5 L3 Q/);
+    const m61     = idx(ls, /^M61 Q0$/);
+    assert.ok(release >= 0 && dbRead > release, 'drawbar read comes after the release');
+    assert.ok(lift > dbRead, 'the spindle only lifts once the drawbar reads open');
+    assert.ok(tisRead > lift, '"spindle empty" is only a settled question after the lift');
+    assert.ok(m61 > tisRead, 'the controller is told T0 after the checks');
+    assert.match(ls[dbRead + 1], /^o\d+ if \[#5399 EQ -1\]$/);
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_OPEN)'));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_STILL_GRIPPED)'));
+  });
+
+  test('load: both checks land before the fork slide-out, not after it', () => {
+    const s = sensed({ drawbarInput: 3, toolSensorInput: 5 });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const clamp   = idx(ls, /^M65 P1$/);
+    const dbClose = idx(ls, /^M66 P3 L3 Q/);
+    const tisRead = idx(ls, /^M66 P5 L4 Q/);
+    const slideOut = idx(ls, /^G53 G1 X-75 Y-40 F/);
+    assert.ok(clamp >= 0 && dbClose > clamp, 'drawbar-closed read follows the clamp');
+    assert.ok(tisRead > dbClose, 'tool presence is checked after the drawbar closed');
+    assert.ok(slideOut > tisRead,
+      `the fork slide-out must come after both checks — got slideOut=${slideOut}, tisRead=${tisRead}`);
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_CLOSE)'));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT)'));
+  });
+
+  test('load from empty also verifies the release before descending onto the shank', () => {
+    const s = sensed({ drawbarInput: 3 });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const open = idx(ls, /^M66 P3 L4 Q/);
+    const descend = idx(ls, /^G53 G0 Z-99$/);
+    assert.ok(open >= 0 && descend > open,
+      'the drawbar-open check must precede the descent onto the shank');
+  });
+
+  test('a chained load does not re-verify a release the unload already checked', () => {
+    const s = sensed({ drawbarInput: 3 });
+    const g = buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', /* alreadyReleased */ true, { x: 0, y: 0 }, true);
+    assert.doesNotMatch(g, /M66 P3 L4 Q/);      // no "must be open" read
+    assert.match(g, /M66 P3 L3 Q/);             // still checks it closed after the clamp
+  });
+
+  test('each guard is independent: one pin on, the other silent', () => {
+    const dbOnly = sensed({ drawbarInput: 3 });
+    const gd = buildUnloadTool(dbOnly, 1, calculateSlotPosition(dbOnly, 1), { x: 0, y: 0 });
+    assert.match(gd, /DRAWBAR_FAILED_TO_OPEN/);
+    assert.doesNotMatch(gd, /TOOL_STILL_GRIPPED/);
+
+    const tisOnly = sensed({ toolSensorInput: 5 });
+    const gt = buildUnloadTool(tisOnly, 1, calculateSlotPosition(tisOnly, 1), { x: 0, y: 0 });
+    assert.match(gt, /TOOL_STILL_GRIPPED/);
+    assert.doesNotMatch(gt, /DRAWBAR_FAILED_TO_OPEN/);
+  });
+
+  test('o-word labels are unique across a full swap program', () => {
+    const s = sensed({ drawbarInput: 3, toolSensorInput: 5, pressureInput: 2 });
+    const prog = buildToolChangeProgram(s, 1, 2, { x: 0, y: 0 }, 0, { x: 0, y: 0 });
+    const g = (Array.isArray(prog) ? prog.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')).join('\n') : String(prog));
+    const opens = (g.match(/^\s*o\d+ if /gm) || []).map((l) => l.trim().split(' ')[0]);
+    assert.ok(opens.length > 0, 'expected guards in a swap program');
+    assert.equal(new Set(opens).size, opens.length,
+      `o-word labels must not repeat within one program — got ${opens.join(', ')}`);
+  });
+});
+
+// === Fault retreat ======================================================
+//
+// A fault lifts clear of the rack so the operator can work, and drops back
+// before the sequence carries on. Both moves must live inside the if-block:
+// on the happy path neither may be emitted, and after Continue the spindle
+// has to be back where the remaining g-code assumes it is.
+describe('sensor guards — retreat to Z-safe on a fault', () => {
+  const cfg = (extra) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+    clampAuxOutput: 1, rackHolding: 'Fork', drawbarInput: 3, toolSensorInput: 5, ...extra
+  });
+  const lines = (g) => g.split('\n').map((l) => l.trim()).filter(Boolean);
+  // the lines between `oN if` and `oN endif`
+  const block = (ls, n) => {
+    const a = ls.findIndex((l) => l === `o${n} if [#5399 EQ -1]`);
+    const b = ls.findIndex((l) => l === `o${n} endif`);
+    assert.ok(a >= 0 && b > a, `block o${n} not found`);
+    return ls.slice(a + 1, b);
+  };
+
+  test('load: lift precedes the dialog, descent follows the M0, both inside the block', () => {
+    const s = cfg();
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    for (const n of [211, 212]) {
+      const b = block(ls, n);
+      assert.equal(b[0], 'G53 G0 Z0', `o${n}: must lift to Z-safe first`);
+      assert.match(b[1], /^\(MSG, PLUGIN_PNEUMATICATC:/, `o${n}: dialog after the lift`);
+      assert.equal(b[2], 'M0', `o${n}: pause after the dialog`);
+      assert.equal(b[3], 'G53 G1 Z-100 F300', `o${n}: must return to the slot Z it checked at`);
+      assert.equal(b.length, 4, `o${n}: nothing else in the block`);
+    }
+  });
+
+  test('the fork slide-out still comes after the return, not after the lift', () => {
+    const s = cfg();
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const endif = ls.lastIndexOf('o212 endif');
+    const slide = ls.findIndex((l) => /^G53 G1 X-75 Y-40 F/.test(l));
+    assert.ok(slide > endif,
+      'resuming must descend back to slot Z before sliding out, or the tool is left in the rack');
+  });
+
+  test('a check already taken at Z-safe does not lift or descend', () => {
+    const s = cfg();
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const b = block(ls, 210);   // the release before descending onto the shank
+    assert.deepEqual(b, ['(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_OPEN)', 'M0'],
+      'no retreat is needed where the spindle is already clear');
+  });
+
+  test('unload: lifts from the drawbar-offset height and returns to it', () => {
+    const s = cfg();
+    const ls = lines(buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }));
+    const b = block(ls, 200);
+    assert.equal(b[0], 'G53 G0 Z0');
+    assert.equal(b[3], 'G53 G1 Z-99 F300', 'returns to slot.z + drawbar offset, where the check was taken');
+    const empty = block(ls, 201);   // taken after the lift, so already clear
+    assert.deepEqual(empty, ['(MSG, PLUGIN_PNEUMATICATC:TOOL_STILL_GRIPPED)', 'M0']);
+  });
+
+  test('the retreat never reaches a machine with no sensors wired', () => {
+    const s = buildInitialConfig({
+      slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+      clampAuxOutput: 1, rackHolding: 'Fork'
+    });
+    const g = buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false)
+      + buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 });
+    assert.doesNotMatch(g, /o2\d\d/);
+    assert.doesNotMatch(g, /M0/);
+  });
+});
+
+// === Event g-code modal containment ====================================
+//
+// Pre/Post Tool Change snippets run in the PROGRAM's units by design -- they
+// sit outside the G21 wrapper that makes the plugin's own mm config correct.
+// What must not happen is a modal word in the snippet surviving into the rest
+// of the job: a G21 written "to be safe" on an inch program would put every
+// remaining line in millimetres, silently.
+describe('event g-code cannot leak modal state into the job', () => {
+  const withEvents = (pre, post) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80,
+    clampAuxOutput: 1, rackHolding: 'Fork',
+    preToolChangeGcode: pre, postToolChangeGcode: post
+  });
+  const program = (s) => {
+    const r = buildToolChangeProgram(s, 1, 2, { x: 0, y: 0 }, 0, { x: 0, y: 0 });
+    return (Array.isArray(r) ? r.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')) : [String(r)])
+      .join('\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  };
+
+  test('a post event is bracketed by a units and distance-mode restore', () => {
+    const ls = program(withEvents('', 'G21\nG91\nG0 Z-5'));
+    const capU = ls.indexOf('#<post_units> = [20 + #<_metric>]');
+    const capD = ls.indexOf('#<post_dist> = [91 - #<_absolute>]');
+    const body = ls.indexOf('G0 Z-5');
+    const relU = ls.indexOf('G[#<post_units>]');
+    const relD = ls.indexOf('G[#<post_dist>]');
+    assert.ok(capU >= 0 && capD > capU, 'both modes captured before the snippet');
+    assert.ok(body > capD, 'snippet runs after the capture');
+    assert.ok(relU > body && relD > relU, 'both restored after the snippet');
+  });
+
+  test('a pre event gets its own bracket, independent of the post one', () => {
+    const ls = program(withEvents('G20', 'G91'));
+    assert.ok(ls.includes('#<pre_units> = [20 + #<_metric>]'));
+    assert.ok(ls.includes('G[#<pre_dist>]'));
+    assert.ok(ls.includes('#<post_units> = [20 + #<_metric>]'));
+    assert.ok(ls.includes('G[#<post_dist>]'));
+    assert.ok(ls.indexOf('G[#<pre_units>]') < ls.indexOf('#<post_units> = [20 + #<_metric>]'),
+      'the pre bracket closes before the post one opens');
+  });
+
+  test('no event configured emits no bracket at all', () => {
+    const g = program(withEvents('', '')).join('\n');
+    assert.doesNotMatch(g, /pre_units|post_units|pre_dist|post_dist/);
+  });
+
+  // The plugin's own moves stay metric regardless -- that wrapper is what
+  // makes its millimetre config mean what it says.
+  test('the plugin still forces G21 for its own moves and restores after', () => {
+    const g = program(withEvents('', 'G0 Z-5')).join('\n');
+    assert.match(g, /#<return_units> = \[20 \+ #<_metric>\]/);
+    assert.match(g, /G\[#<return_units>\]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Z0 set before a Tool Length Reference (the gSender habit). The host reports
+// machineState.zeroSetWithoutTlr / zeroTool; every TLS path must keep that Z0.
+// ---------------------------------------------------------------------------
+describe('keeps a Z0 set before any tool length reference', () => {
+  const settings = buildInitialConfig({
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5,
+    clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, tlsMode: 'library',
+  });
+  const tools = [
+    { toolNumber: 1, offsets: { x: 0, y: 0, z: -55.014, tlsZ: 0 } },
+    { toolNumber: 2, offsets: { x: 0, y: 0, z: -48.2, tlsZ: 0 } },
+  ];
+  const pending = { toolLengthSet: false, zeroSetWithoutTlr: true, zeroTool: 1 };
+  const run = (command, ms) => {
+    const commands = [{ command, isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 1, mpos: { x: 10, y: 20 }, ...ms }, tools }, { ...settings });
+    return commands.map((c) => c.command.trim());
+  };
+  const at = (lines, re) => lines.findIndex((l) => re.test(l));
+  const keepRef = /^G10 L2 P\[#5220\] Z\[#<_cur_wcs_z_ofs> - #<_nc_ref_tlo>\]$/;
+  const keepSelf = /^G10 L2 P\[#5220\] Z\[#<_cur_wcs_z_ofs> - #<_nc_last_tlo>\]$/;
+
+  test('M6 measures the tool that set Z0 before unloading it, then keeps Z0 with the new tool', () => {
+    const lines = run('M6 T2', pending);
+    const ref = at(lines, /^#<_nc_ref_tlo> = #<_nc_last_tlo>$/);
+    const unload = at(lines, /^M61 Q0$/);
+    const g10 = at(lines, keepRef);
+    assert.ok(ref >= 0, 'reference measure present');
+    assert.ok(unload > ref, 'reference measure happens before the unload');
+    assert.ok(g10 > ref, 'Z0 is kept after the new tool is measured');
+    const notifyBefore = lines.slice(0, g10).lastIndexOf('$#=_tool_offset');
+    assert.ok(notifyBefore > ref, 'offset applied and announced before the work offset is written');
+  });
+
+  test('the reference measure leaves the new tool\'s library writeback alone', () => {
+    const lines = run('M6 T2', pending);
+    const ref = at(lines, /^#<_nc_ref_tlo> = #<_nc_last_tlo>$/);
+    const firstDump = lines.indexOf('$#');
+    assert.ok(firstDump > ref, 'no [#] dump before the new tool is measured');
+    assert.equal(lines.filter((l) => /^G10 L2/.test(l)).length, 1, 'one work-offset write only');
+    const beforeRef = lines.slice(0, ref);
+    assert.ok(!beforeRef.includes('$#=_tool_offset'), 'the reference measure does not announce a reference');
+  });
+
+  test('after the extra touch-off it goes straight to the rack, and only returns to the job at the end', () => {
+    const lines = run('M6 T2', pending);
+    const ref = at(lines, /^#<_nc_ref_tlo> = #<_nc_last_tlo>$/);
+    const unload = at(lines, /^M61 Q0$/);
+    const between = lines.slice(ref, unload);
+    assert.ok(!between.some((l) => /^G53 G0 X10 Y20$/.test(l)), 'no detour back to the job before the swap');
+    const load = at(lines, /^M61 Q2$/);
+    assert.ok(lines.slice(load).some((l) => /^G53 G0 X10 Y20$/.test(l)), 'returns to the job after the change');
+  });
+
+  test('the unload route starts at the toolsetter, same as a change that began there', () => {
+    const fromTls = run('M6 T2', pending);
+    const unloadA = fromTls.slice(fromTls.indexOf('(MSG, ZERO_KEEP_END)') + 1, at(fromTls, /^M61 Q0$/) + 1);
+    const commands = [{ command: 'M6 T2', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 1, mpos: { x: 300, y: -200 }, toolLengthSet: true }, tools }, { ...settings });
+    const plain = commands.map((c) => c.command.trim());
+    const unloadB = plain.slice(plain.indexOf('G53 G0 Z-5') + 1, at(plain, /^M61 Q0$/) + 1);
+    assert.deepEqual(unloadA, unloadB);
+  });
+
+  test('the extra measure is wrapped in ZERO_KEEP markers for the UI banner', () => {
+    const lines = run('M6 T2', pending);
+    const a = lines.indexOf('(MSG, ZERO_KEEP_START T1)');
+    const b = lines.indexOf('(MSG, ZERO_KEEP_END)');
+    assert.ok(a >= 0 && b > a);
+    assert.ok(lines.slice(a, b).some((l) => /^G38\.2/.test(l)), 'touch-off inside the markers');
+    assert.ok(b < at(lines, /^M61 Q0$/), 'banner is gone before the swap');
+    assert.equal(run('M6 T2', { toolLengthSet: false, zeroSetWithoutTlr: false, zeroTool: 0 }).indexOf('(MSG, ZERO_KEEP_START T1)'), -1);
+  });
+
+  test('M6 T0 fixes the reference with the current tool before putting it away', () => {
+    const lines = run('M6 T0', pending);
+    assert.ok(at(lines, keepSelf) >= 0);
+    assert.ok(at(lines, keepSelf) < at(lines, /^M61 Q0$/));
+  });
+
+  test('$TLS and $MEASURE_TLO on the loaded tool keep the Z0', () => {
+    assert.ok(at(run('$TLS', pending), keepSelf) >= 0, '$TLS');
+    assert.ok(at(run('$MEASURE_TLO T1', pending), keepSelf) >= 0, '$MEASURE_TLO');
+  });
+
+  test('nothing changes when no Z0 is pending, a reference exists, or another tool set Z0', () => {
+    for (const ms of [
+      { toolLengthSet: false, zeroSetWithoutTlr: false, zeroTool: 0 },
+      { toolLengthSet: true, zeroSetWithoutTlr: true, zeroTool: 1 },
+      { toolLengthSet: false, zeroSetWithoutTlr: true, zeroTool: 3 },
+    ]) {
+      for (const cmd of ['M6 T2', '$TLS']) {
+        const lines = run(cmd, ms);
+        assert.ok(!lines.some((l) => /^G10 L2/.test(l)), `${cmd} ${JSON.stringify(ms)}`);
+        assert.ok(!lines.some((l) => /_nc_ref_tlo/.test(l)), `${cmd} ${JSON.stringify(ms)}`);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Library strategy, no reference yet, Z0 pending: the outgoing tool's
+// reference touch-off validates the library for this boot, and the
+// controller picks the ending (grblHAL o-word if/else) — load the new tool
+// from the library when the touch matches, measure it when it doesn't.
+// ---------------------------------------------------------------------------
+describe('Z0 carry-over trusts the library when the reference touch matches it', () => {
+  const base = {
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5,
+    clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, tlsMode: 'library',
+  };
+  const tools = [
+    { toolNumber: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
+    { toolNumber: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
+    { toolNumber: 3, offsets: { x: 0, y: 0, z: 0, tlsZ: 0 } },
+    { toolNumber: 9, offsets: { x: 0, y: 0, z: -40.1, tlsZ: 0 } },
+  ];
+  const run = (command, { tool = 1, settings = {}, toolList = tools, ms = {} } = {}) => {
+    const commands = [{ command, isOriginal: true }];
+    onBeforeCommand(commands, {
+      machineState: { tool, mpos: { x: 10, y: 20 }, toolLengthSet: false, zeroSetWithoutTlr: true, zeroTool: tool, ...ms },
+      tools: toolList,
+    }, buildInitialConfig({ ...base, ...settings }));
+    return commands.map((c) => c.command.trim());
+  };
+  const idx = (lines, re) => lines.findIndex((l) => re.test(l));
+
+  test('M6 T2 branches on the reference touch against T1\'s library TLO', () => {
+    const lines = run('M6 T2');
+    const ref = idx(lines, /^#<_nc_ref_tlo> = #<_nc_last_tlo>$/);
+    const check = lines.indexOf('#<_nc_lib_ok> = [ABS[#<_nc_ref_tlo> - [-46.63]] LT 0.05]');
+    const iff = lines.indexOf('o7101 if [#<_nc_lib_ok>]');
+    const els = lines.indexOf('o7101 else');
+    const end = lines.indexOf('o7101 endif');
+    assert.ok(ref >= 0 && check > ref && iff > check && els > iff && end > els, lines.join('\n'));
+    assert.ok(idx(lines, /^M61 Q0$/) < iff, 'the unload is shared, before the branch');
+  });
+
+  test('library ending loads the stored TLO without touching off; the other ending measures', () => {
+    const lines = run('M6 T2');
+    const lib = lines.slice(lines.indexOf('o7101 if [#<_nc_lib_ok>]'), lines.indexOf('o7101 else'));
+    const meas = lines.slice(lines.indexOf('o7101 else'), lines.indexOf('o7101 endif'));
+    assert.ok(lib.includes('G43.1 Z-33.78'));
+    assert.ok(!lib.some((l) => /^G38\./.test(l)), 'no touch-off in the library ending');
+    assert.ok(lib.includes('M61 Q2') && meas.includes('M61 Q2'), 'both endings load T2');
+    assert.ok(meas.some((l) => /^G38\.2/.test(l)));
+    assert.ok(meas.includes('G43.1 Z[#<_nc_last_tlo>]'));
+    assert.ok(lib.includes('G53 G0 X10 Y20') && meas.includes('G53 G0 X10 Y20'), 'both return to the job');
+  });
+
+  test('no $ line inside the branches: grblHAL runs those even in the branch it skips', () => {
+    const lines = run('M6 T2');
+    const inside = lines.slice(lines.indexOf('o7101 if [#<_nc_lib_ok>]'), lines.indexOf('o7101 endif'));
+    const bare = inside.map((l) => l.replace(/^\$keepout_off\s+/, ''));
+    assert.deepEqual(bare.filter((l) => l.startsWith('$')), []);
+  });
+
+  test('after the endif: announce, keep Z0 by the reference, dump for the writeback', () => {
+    const lines = run('M6 T2');
+    const tail = lines.slice(lines.indexOf('o7101 endif'));
+    const notify = tail.indexOf('$#=_tool_offset');
+    const g10 = idx(tail, /^G10 L2 P\[#5220\] Z\[#<_cur_wcs_z_ofs> - #<_nc_ref_tlo>\]$/);
+    const dump = tail.indexOf('$#');
+    assert.ok(notify > 0 && g10 > notify && dump > g10, tail.join('\n'));
+    assert.equal(lines.filter((l) => /^G10 L2/.test(l)).length, 1);
+  });
+
+  test('no branch — measured as before — when the library cannot be checked or trusted', () => {
+    const cases = {
+      'outgoing tool has no library TLO': run('M6 T2', { tool: 3 }),
+      'new tool has no library TLO': run('M6 T3'),
+      'always strategy': run('M6 T2', { settings: { tlsMode: 'always' } }),
+      'outgoing tool is a hand-fitted manual tool': run('M6 T2', { tool: 9 }),
+      'no Z0 pending': run('M6 T2', { ms: { zeroSetWithoutTlr: false } }),
+    };
+    for (const [why, lines] of Object.entries(cases)) {
+      assert.ok(!lines.some((l) => /^o7101/.test(l)), why);
+    }
+    const measured = cases['outgoing tool has no library TLO'];
+    assert.ok(measured.some((l) => /^G38\.2/.test(l)), 'still measures the new tool');
+  });
+
+  test('with a reference already set nothing branches (library loads directly)', () => {
+    const lines = run('M6 T2', { ms: { toolLengthSet: true, zeroSetWithoutTlr: false } });
+    assert.ok(!lines.some((l) => /^o7101/.test(l)));
+    assert.ok(lines.includes('G43.1 Z-33.78'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Post Tool Change runs after the new tool is in and the spindle has left the
+// rack / tool setter, BEFORE the final leg back to where the change started —
+// not after it (a dust-shoe pickup used to drive back to the work first).
+// ---------------------------------------------------------------------------
+describe('Post Tool Change runs before the return to origin', () => {
+  const base = {
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5,
+    clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, tlsMode: 'library',
+    postToolChangeGcode: '(POST TC)\nG53 G0 X500 Y500',
+  };
+  const tools = [
+    { toolNumber: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
+    { toolNumber: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
+  ];
+  const run = (command, { settings = {}, ms = {} } = {}) => {
+    const commands = [{ command, isOriginal: true }];
+    onBeforeCommand(commands, {
+      machineState: { tool: 1, mpos: { x: 10, y: 20 }, toolLengthSet: true, ...ms }, tools,
+    }, buildInitialConfig({ ...base, ...settings }));
+    return commands.map((c) => c.command.trim());
+  };
+  const leg = (l) => /G53 G0 X10 Y20$/.test(l);
+  const post = (lines) => lines.indexOf('(POST TC)');
+  const lastLeg = (lines) => lines.map((l, i) => (leg(l) ? i : -1)).filter((i) => i >= 0).pop();
+
+  const check = (lines, why) => {
+    const p = post(lines);
+    const back = lastLeg(lines);
+    assert.ok(p >= 0 && back > p, `${why}: event before the final leg\n${lines.join('\n')}`);
+    const between = lines.slice(p, back);
+    assert.ok(between.some((l) => /^G21$/.test(l)), `${why}: back to mm after the event`);
+    assert.ok(between.some((l) => /G53 G0 Z-5$/.test(l)), `${why}: safe Z before the final leg`);
+    assert.equal(lines.filter(leg).length, 1, `${why}: one return to origin`);
+    assert.ok(!/^\$keepout_off/.test(lines[back]), `${why}: the final leg keeps the core keepout check`);
+  };
+
+  test('library load (no touch-off)', () => check(run('M6 T2'), 'library'));
+  test('measured load', () => check(run('M6 T2', { settings: { tlsMode: 'always' } }), 'always'));
+  test('standalone $TLS', () => check(run('$TLS'), '$TLS'));
+
+  test('Z0 carry-over branch: event and final leg after the endif, never inside a branch', () => {
+    const lines = run('M6 T2', { ms: { toolLengthSet: false, zeroSetWithoutTlr: true, zeroTool: 1 } });
+    const end = lines.indexOf('o7101 endif');
+    assert.ok(end >= 0);
+    assert.ok(post(lines) > end, 'event after the endif');
+    assert.ok(!lines.slice(0, end).some(leg), 'no return to origin inside the branches');
+    check(lines, 'branch');
+  });
+
+  test('with no event the program is unchanged: the return is the last move', () => {
+    const lines = run('M6 T2', { settings: { postToolChangeGcode: '' } });
+    assert.equal(post(lines), -1);
+    assert.equal(lines.filter(leg).length, 1);
+  });
+});
+
+describe('homing', () => {
+  test('$H passes through untouched: no tool setter run after homing', () => {
+    const settings = buildInitialConfig({ slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5, clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, performTlsAfterHome: true });
+    const commands = [{ command: '$H', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 1, mpos: { x: 10, y: 20 } }, tools: [] }, { ...settings });
+    assert.deepEqual(commands.map((c) => c.command.trim()), ['$H']);
+  });
+});
+
+describe('manual tools always measure', () => {
+  const settings = buildInitialConfig({
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5,
+    clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, manualTool: { x: 200, y: -100 }, tlsMode: 'library',
+  });
+  const tools = [
+    { toolNumber: 2, offsets: { z: -52.1 } },   // rack tool, TLO on file
+    { toolNumber: 5, offsets: { z: -47.5 } },   // manual tool, TLO on file
+  ];
+  const run = (command, tool = 1) => {
+    const commands = [{ command, isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool, mpos: { x: 10, y: 20 }, toolLengthSet: true }, tools }, { ...settings });
+    return commands.map((c) => c.command.trim());
+  };
+
+  test('a manual tool with a stored TLO is measured, not loaded from the library', () => {
+    const lines = run('M6 T5');
+    assert.ok(lines.some((l) => /^G38\.2/.test(l)), 'expected a probe move');
+    assert.ok(!lines.some((l) => /Load stored TLO/.test(l)), 'must not reuse the stored value');
+  });
+
+  test('a manual-to-manual swap is measured too', () => {
+    const lines = run('M6 T5', 4);
+    assert.ok(lines.some((l) => /^G38\.2/.test(l)));
+  });
+
+  test('a rack tool with a stored TLO still follows the library strategy', () => {
+    const lines = run('M6 T2');
+    assert.ok(!lines.some((l) => /^G38\.2/.test(l)), 'rack tool reuses its stored value');
+    assert.ok(lines.some((l) => /Load stored TLO/.test(l)));
+  });
+});
+
+describe('Sienci profile turns the Sienci keepout off around rack moves', () => {
+  const base = { slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5, clampAuxOutput: 1 };
+  const runM6 = (extra, tool = 0) => {
+    const commands = [{ command: 'M6 T2', isOriginal: true }];
+    onBeforeCommand(commands, { edition: 'pro', machineState: { tool, mpos: { x: 10, y: 20 } }, tools: [] },
+      buildInitialConfig({ ...base, ...extra }));
+    return commands.map((c) => c.command.trim());
+  };
+
+  test('off before the first rack move, back on after the change', () => {
+    const lines = runM6({ atcProfile: 'sienci' }, 1);
+    const off = lines.findIndex((l) => l.startsWith('M960 P0'));
+    const on = lines.findIndex((l) => l.startsWith('M960 P1'));
+    const firstXY = lines.findIndex((l) => /^G53 G0 X/.test(l));
+    assert.ok(off >= 0 && on > off, 'both present, off first');
+    assert.ok(off < firstXY, 'off before any XY move');
+    assert.ok(on > lines.findIndex((l) => l.startsWith('M61 Q2')), 'on after the new tool is in');
+  });
+
+  test('other profiles send no M960', () => {
+    assert.ok(!runM6({ atcProfile: 'custom' }, 1).some((l) => l.startsWith('M960')));
+    assert.ok(!runM6({}, 1).some((l) => l.startsWith('M960')));
+  });
+
+  test('$slotN (parks in the rack) only turns it off', () => {
+    const commands = [{ command: '$slot2', isOriginal: true }];
+    onBeforeCommand(commands, { edition: 'pro', machineState: { tool: 0, mpos: { x: 10, y: 20 } }, tools: [] },
+      buildInitialConfig({ ...base, atcProfile: 'sienci' }));
+    const lines = commands.map((c) => c.command.trim());
+    assert.ok(lines.some((l) => l.startsWith('M960 P0')));
+    assert.ok(!lines.some((l) => l.startsWith('M960 P1')));
+  });
+});
+
+describe('Sienci profile slide speed', () => {
+  test('uses the kit value even when an imperial save stored 50800', () => {
+    assert.equal(buildInitialConfig({ atcProfile: 'sienci', slideSpeed: 50800 }).slideSpeed, 2000);
+  });
+  test('other profiles keep their own value', () => {
+    assert.equal(buildInitialConfig({ slideSpeed: 900 }).slideSpeed, 900);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retractable tool rack: a digital output extends the rack into position
+// before any load/unload and retracts it clear afterward, so it is out of the
+// machining envelope the rest of the time. Two independent end-stop sensors
+// (available / unavailable), each its own optional guard. Off unless the
+// "Moving tool rack" switch is on AND an output is chosen.
+// ---------------------------------------------------------------------------
+describe('retractable tool rack', () => {
+  // Earlier tests leave the module in Pro mode, which prefixes G53 legs with
+  // $keepout_off; the rack assertions are about order, not about that prefix.
+  const mLines = (gcode) => motionLines(gcode).map((l) => l.replace(/^\$keepout_off\s+/, ''));
+  const BASE = {
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+    clampAuxOutput: 2, rackHolding: 'Cup', toolsetter: { x: 300, y: -200 },
+    manualTool: { x: 321, y: -966 }, tlsMode: 'always',
+  };
+  const PINS = { toolRackAuxOutput: 3, toolRackAvailableSensorInput: 6, toolRackUnavailableSensorInput: 7 };
+  const NO_RACK = buildInitialConfig({ ...BASE });
+  const LEGACY = buildInitialConfig({ ...BASE, ...PINS });                      // pins, no switch field
+  const ON = buildInitialConfig({ ...BASE, ...PINS, toolRackEnabled: true });
+  const OFF = buildInitialConfig({ ...BASE, ...PINS, toolRackEnabled: false });
+  const ORIGIN = { x: 60, y: 120 };
+  const program = (s, from, to, opts = {}) =>
+    buildToolChangeProgram(s, from, to, { x: 0, y: 0 }, 0, ORIGIN, opts).join('\n');
+  const expand = (command, settings, tool = 1, ctx = {}) => {
+    const commands = [{ command, isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool, mpos: ORIGIN }, tools: [], ...ctx }, { ...settings });
+    return commands.map((c) => c.command).join('\n');
+  };
+  const TRANSITIONS = [[0, 1], [1, 2], [2, 1], [1, 0], [0, 4], [4, 5], [4, 1], [1, 4]];
+
+  describe('settings', () => {
+    test('with nothing configured the rack is off and every pin is -1', () => {
+      assert.equal(NO_RACK.toolRackEnabled, false);
+      assert.equal(NO_RACK.toolRackAuxOutput, -1);
+      assert.equal(NO_RACK.toolRackAvailableSensorInput, -1);
+      assert.equal(NO_RACK.toolRackUnavailableSensorInput, -1);
+      assert.equal(buildInitialConfig({ toolRackAuxOutput: 'M8' }).toolRackAuxOutput, 'M8');
+      assert.equal(buildInitialConfig({ toolRackAvailableSensorInput: '6' }).toolRackAvailableSensorInput, 6);
+    });
+
+    test('a config with an output but no switch is on; an explicit value always wins', () => {
+      assert.equal(LEGACY.toolRackEnabled, true, 'saved before the switch existed: on exactly because an output was set');
+      assert.equal(buildInitialConfig({ toolRackAuxOutput: 'M8' }).toolRackEnabled, true);
+      assert.equal(buildInitialConfig({ toolRackAuxOutput: -1 }).toolRackEnabled, false);
+      assert.equal(OFF.toolRackEnabled, false);
+      assert.equal(buildInitialConfig({ toolRackEnabled: true }).toolRackEnabled, true, 'on with no output may be stored');
+    });
+
+    test('off keeps the pins', () => {
+      assert.equal(OFF.toolRackAuxOutput, 3);
+      assert.equal(OFF.toolRackAvailableSensorInput, 6);
+      assert.equal(OFF.toolRackUnavailableSensorInput, 7);
+    });
+  });
+
+  describe('off', () => {
+    test('no output chosen: no rack lines, no dialogs', () => {
+      const p = program(NO_RACK, 0, 1);
+      assert.ok(!p.includes('M64 P3') && !p.includes('M65 P3'));
+      assert.ok(!p.includes('TOOLRACK'));
+    });
+
+    test('switched off with pins configured: every program equals one with no rack at all', () => {
+      for (const [from, to] of TRANSITIONS) {
+        assert.equal(program(OFF, from, to), program(NO_RACK, from, to), `T${from}->T${to}`);
+      }
+      const p = program(OFF, 0, 1);
+      assert.ok(!p.includes('M64 P3') && !p.includes('M65 P3') && !p.includes('TOOLRACK') && !p.includes('M66 P6'));
+    });
+
+    test('switched on but no output chosen: nothing to drive, programs equal no rack at all', () => {
+      const noOutput = buildInitialConfig({ ...BASE, toolRackEnabled: true, toolRackAvailableSensorInput: 6, toolRackUnavailableSensorInput: 7 });
+      for (const [from, to] of TRANSITIONS) {
+        assert.equal(program(noOutput, from, to), program(NO_RACK, from, to), `T${from}->T${to}`);
+      }
+    });
+
+    test('a config saved before the switch existed behaves exactly like an explicitly switched-on rack', () => {
+      for (const [from, to] of TRANSITIONS) {
+        assert.equal(program(LEGACY, from, to), program(ON, from, to), `T${from}->T${to}`);
+      }
+    });
+
+    test('an unsanitized settings object keeps the old meaning: on when an output is set, only an explicit false switches it off', () => {
+      const raw = { ...BASE, ...PINS };
+      assert.ok(program(raw, 0, 1).includes('M64 P3'));
+      assert.ok(!program({ ...BASE }, 0, 1).includes('M64 P3'));
+      assert.ok(!program({ ...raw, toolRackEnabled: false }, 0, 1).includes('M64 P3'));
+    });
+
+    test('switching off and back on loses nothing: the settings round-trip to the same program', () => {
+      assert.equal(program(buildInitialConfig({ ...OFF, toolRackEnabled: true }), 1, 2), program(ON, 1, 2));
+    });
+  });
+
+  describe('M6', () => {
+    test('output configured, sensors not: fires the aux lines with no M66 verification', () => {
+      const outputOnly = buildInitialConfig({ ...BASE, toolRackAuxOutput: 3 });
+      const p = program(outputOnly, 0, 1);
+      assert.ok(p.includes('M64 P3') && p.includes('M65 P3'));
+      assert.doesNotMatch(p, /M66/);
+    });
+
+    test('an unsanitized settings object never builds M66 Pundefined', () => {
+      const p = program({ ...BASE, toolRackAuxOutput: 3 }, 0, 1);
+      assert.doesNotMatch(p, /Pundefined|M66/);
+    });
+
+    test('M7/M8 outputs: extend is the M-code, retract is M9', () => {
+      const lines = mLines(program(buildInitialConfig({ ...BASE, toolRackAuxOutput: 'M8' }), 0, 1));
+      assert.ok(lines.includes('M8') && lines.includes('M9'));
+    });
+
+    test('extend fires and is verified before any unload/load motion', () => {
+      const p = program(ON, 0, 1);
+      const lines = mLines(p);
+      const extendIdx = lines.indexOf('M64 P3');
+      const readIdx = lines.indexOf('M66 P6 L3 Q0.01');
+      const firstMotion = lines.findIndex((l) => /^G53 G[01] [XY]/.test(l));
+      assert.ok(extendIdx !== -1 && readIdx !== -1 && firstMotion !== -1);
+      assert.ok(extendIdx < readIdx && readIdx < firstMotion, 'rack extends and verifies before any approach motion');
+      assert.ok(p.includes('(MSG, PLUGIN_PNEUMATICATC:TOOLRACK_FAULT)'));
+    });
+
+    test('retract fires after everything rack-related and is verified', () => {
+      const p = program(ON, 0, 1);
+      const lines = mLines(p);
+      const retractIdx = lines.indexOf('M65 P3');
+      assert.ok(retractIdx !== -1);
+      assert.ok(lines.indexOf('M66 P7 L3 Q0.01', retractIdx) > retractIdx, 'verification follows the retract line');
+      assert.ok(p.includes('(MSG, PLUGIN_PNEUMATICATC:TOOLRACK_RETRACT_FAULT)'));
+      let lastM61 = -1;
+      lines.forEach((l, i) => { if (/^M61 Q/.test(l)) lastM61 = i; });
+      assert.ok(retractIdx > lastM61, 'after the change has reported its outcome');
+    });
+
+    test('a rack-to-rack swap extends once and retracts once, not between unload and load', () => {
+      const lines = mLines(program(ON, 1, 2));
+      assert.equal(lines.filter((l) => l === 'M64 P3').length, 1);
+      assert.equal(lines.filter((l) => l === 'M65 P3').length, 1);
+    });
+
+    test('pure manual-to-manual never touches the rack', () => {
+      const p = program(ON, 4, 5);
+      assert.ok(!p.includes('M64 P3') && !p.includes('M65 P3'));
+    });
+
+    test('a bare unload to T0 from a rack slot still extends and retracts', () => {
+      const p = program(ON, 1, 0);
+      assert.ok(p.includes('M64 P3') && p.includes('M65 P3'));
+    });
+
+    test('extend and retract each force their own Z-safe move, then a G4 P0 planner sync, before actuating', () => {
+      const lines = mLines(program(ON, 0, 1));
+      const extendIdx = lines.indexOf('M64 P3');
+      const retractIdx = lines.indexOf('M65 P3');
+      assert.ok(extendIdx > 1 && retractIdx > 1);
+      assert.equal(lines[extendIdx - 2], `G53 G0 Z${ON.zSafe}`);
+      assert.equal(lines[extendIdx - 1], 'G4 P0', 'a zero dwell so the planner fully stops first');
+      assert.equal(lines[retractIdx - 2], `G53 G0 Z${ON.zSafe}`);
+      assert.equal(lines[retractIdx - 1], 'G4 P0');
+    });
+  });
+
+  describe('other commands', () => {
+    test('$SLOT<n> extends before jogging to the slot but does NOT retract afterward', () => {
+      const lines = mLines(buildSlotNav(ON, 1, ORIGIN));
+      const extendIdx = lines.indexOf('M64 P3');
+      const firstXY = lines.findIndex((l) => /^G53 G0 X/.test(l));
+      assert.ok(extendIdx !== -1 && extendIdx < firstXY);
+      assert.ok(!lines.includes('M65 P3'), 'the operator jogged here deliberately');
+    });
+
+    test('$TLS extends before the probe and retracts after', () => {
+      const lines = mLines(expand('$TLS', ON));
+      const extendIdx = lines.indexOf('M64 P3');
+      const probeIdx = lines.findIndex((l) => /^G38\.2/.test(l));
+      const retractIdx = lines.indexOf('M65 P3');
+      assert.ok(extendIdx !== -1 && probeIdx !== -1 && retractIdx !== -1);
+      assert.ok(extendIdx < probeIdx && probeIdx < retractIdx);
+    });
+
+    test('$MEASURE_TLO Tn with n already in the spindle extends before the probe and retracts after', () => {
+      const lines = mLines(expand('$MEASURE_TLO T1', ON, 1));
+      const extendIdx = lines.indexOf('M64 P3');
+      const probeIdx = lines.findIndex((l) => /^G38\.2/.test(l));
+      const retractIdx = lines.indexOf('M65 P3');
+      assert.ok(extendIdx !== -1 && probeIdx !== -1 && retractIdx !== -1);
+      assert.ok(extendIdx < probeIdx && probeIdx < retractIdx);
+    });
+
+    test('$H is not touched: there is no post-home TLS to bracket', () => {
+      const commands = [{ command: '$H', isOriginal: true }];
+      onBeforeCommand(commands, { machineState: { tool: 1, mpos: ORIGIN }, tools: [] }, { ...ON });
+      assert.deepEqual(commands.map((c) => c.command.trim()), ['$H']);
+    });
+
+    test('with the switch off, $SLOT, $TLS and Measure All Tools never drive it', () => {
+      assert.ok(!buildSlotNav(OFF, 1, ORIGIN).includes('M64 P3'));
+      assert.ok(!expand('$TLS', OFF).includes('M64 P3'));
+      assert.ok(!expand('$MEASURE_TLO T1', OFF, 1).includes('M64 P3'));
+      assert.ok(!expand('$MEASURE_TLO T2', OFF, 1).includes('M64 P3'));
+    });
+
+    test('$MEASURE_TLO that swaps a rack tool extends and retracts like an M6', () => {
+      const p = expand('$MEASURE_TLO T2', ON, 1);
+      assert.ok(p.includes('M64 P3'));
+      assert.ok(!p.includes('M65 P3') || p.indexOf('M65 P3') > p.indexOf('G38.2'));
+    });
+  });
+
+  // Where the rack sits in a v0.1.48 program: the Z0 carry-over touch-off,
+  // Post Tool Change and the final leg all share the swap with it.
+  describe('with the v0.1.48 sequence', () => {
+    const post = '(POST TC)\nG53 G0 X500 Y500';
+    const withPost = buildInitialConfig({ ...BASE, ...PINS, toolRackEnabled: true, postToolChangeGcode: post, tlsMode: 'library' });
+    const tools = [
+      { toolNumber: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
+      { toolNumber: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
+    ];
+    const run = (settings, command, ms = {}) => {
+      const commands = [{ command, isOriginal: true }];
+      onBeforeCommand(commands, {
+        machineState: { tool: 1, mpos: ORIGIN, toolLengthSet: true, ...ms }, tools,
+      }, { ...settings });
+      return commands.map((c) => c.command.trim());
+    };
+    const leg = (l) => /G53 G0 X60 Y120$/.test(l);
+
+    test('the retract comes after Post Tool Change and the final leg back to the start', () => {
+      const lines = run(withPost, 'M6 T2');
+      const p = lines.indexOf('(POST TC)');
+      const back = lines.findIndex(leg);
+      const retract = lines.indexOf('M65 P3');
+      assert.ok(p >= 0 && back > p && retract > back, `post < leg < retract\n${lines.join('\n')}`);
+    });
+
+    test('Z0 carry-over: the rack is out for the touch-off, and retracts only after the shared endif', () => {
+      const lines = run(withPost, 'M6 T2', { toolLengthSet: false, zeroSetWithoutTlr: true, zeroTool: 1 });
+      const extend = lines.indexOf('M64 P3');
+      const start = lines.findIndex((l) => l.includes('ZERO_KEEP_START'));
+      const end = lines.indexOf('o7101 endif');
+      const retract = lines.indexOf('M65 P3');
+      assert.ok(extend >= 0 && start > extend, 'extended before the touch-off starts');
+      assert.ok(end >= 0 && retract > end, 'retracted after both endings');
+      assert.equal(lines.filter((l) => l === 'M64 P3').length, 1);
+      assert.equal(lines.filter((l) => l === 'M65 P3').length, 1, 'once, outside the branches');
+    });
+
+    test('the probe holder is not the rack: T0 to the probe never touches it', () => {
+      const cfg = buildInitialConfig({ ...BASE, ...PINS, toolRackEnabled: true,
+        probe: { enabled: true, toolNumber: 99, x: 300, y: -500, z: -100, holding: 'Cup' } });
+      const p = program(cfg, 0, 99);
+      assert.ok(p.includes('probeLoad'), 'sanity: this is the probe pickup');
+      assert.ok(!p.includes('M64 P3') && !p.includes('M65 P3'));
+      assert.ok(!program(cfg, 99, 0).includes('M64 P3'), 'nor does putting it back');
+    });
+
+    test('a rack tool swapped for the probe extends once and retracts once', () => {
+      const cfg = buildInitialConfig({ ...BASE, ...PINS, toolRackEnabled: true,
+        probe: { enabled: true, toolNumber: 99, x: 300, y: -500, z: -100, holding: 'Cup' } });
+      const lines = mLines(program(cfg, 1, 99));
+      assert.equal(lines.filter((l) => l === 'M64 P3').length, 1);
+      assert.equal(lines.filter((l) => l === 'M65 P3').length, 1);
+    });
+
+    test('Tool ID: a tool that the library puts in a rack pocket drives the rack; an unmapped one is manual and does not', () => {
+      const lib = [{ toolId: 7, toolNumber: 2, offsets: { x: 0, y: 0, z: -30, tlsZ: 0 } }];
+      const mapped = [{ command: 'M6 T7', isOriginal: true }];
+      onBeforeCommand(mapped, { machineState: { tool: 0, mpos: ORIGIN }, tools: lib }, { ...ON });
+      const mappedText = mapped.map((c) => c.command).join('\n');
+      assert.ok(mappedText.includes('M64 P3') && mappedText.includes('M65 P3'), 'Tool ID 7 sits in pocket 2');
+      assert.ok(mappedText.includes('M61 Q7'), 'M61 still reports the Tool ID');
+
+      const unmapped = [{ command: 'M6 T8', isOriginal: true }];
+      onBeforeCommand(unmapped, { machineState: { tool: 0, mpos: ORIGIN }, tools: lib }, { ...ON });
+      const unmappedText = unmapped.map((c) => c.command).join('\n');
+      assert.ok(!unmappedText.includes('M64 P3') && !unmappedText.includes('M65 P3'), 'a hand-loaded tool never touches the rack');
+    });
+  });
+
+  // Every guard needs its own o-word numbers; a collision inside one macro
+  // makes the controller mis-match if/endif.
+  test('o-word labels are unique with every sensor and the rack guards on, across every command', () => {
+    const everything = buildInitialConfig({ ...BASE, pressureInput: 2, drawbarInput: 4, toolSensorInput: 5,
+      ...PINS, toolRackEnabled: true, taperBlow: true,
+      probe: { enabled: true, toolNumber: 99, x: 300, y: -500, z: -100, holding: 'Cup' } });
+    const labels = (text) => (text.match(/\bo\d+\s+if\b/gi) || []).map((l) => l.split(/\s+/)[0].toLowerCase());
+    const programs = [
+      program(everything, 1, 2), program(everything, 0, 1), program(everything, 1, 99), program(everything, 99, 2),
+      expand('$TLS', everything), expand('$MEASURE_TLO T1', everything), expand('$SLOT1', everything),
+    ];
+    for (const text of programs) {
+      const found = labels(text);
+      assert.equal(new Set(found).size, found.length, `duplicate o-word label in: ${found.join(', ')}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A change that starts from T0 first checks the tool sensor: after a restart
+// the controller boots as T0 with whatever was left in the collet, and going on
+// as if empty would take a new tool into an occupied spindle. If a tool is
+// there the operator either releases it by hand (the dialog's Release button)
+// or aborts, tells the controller the tool number (M61) and runs the change
+// again. The plugin cannot tell which tool it is, so it never puts it away
+// itself.
+// ---------------------------------------------------------------------------
+describe('tool found in the spindle when ncSender believes it is empty', () => {
+  const BASE = {
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+    clampAuxOutput: 2, rackHolding: 'Cup', toolsetter: { x: 300, y: -200 },
+    manualTool: { x: 321, y: -966 }, tlsMode: 'always',
+  };
+  const SENSOR = { toolSensorInput: 1 };
+  const RACK = { toolRackAuxOutput: 3, toolRackAvailableSensorInput: 6, toolRackUnavailableSensorInput: 7, toolRackEnabled: true };
+  const ORIGIN = { x: 60, y: 120 };
+  const WITH = buildInitialConfig({ ...BASE, ...SENSOR });
+  const WITHOUT = buildInitialConfig({ ...BASE });
+  const PROBE = { enabled: true, toolNumber: 99, x: 300, y: -500, z: -100, holding: 'Cup' };
+  const program = (s, from, to) => buildToolChangeProgram(s, from, to, { x: 0, y: 0 }, 0, ORIGIN).join('\n');
+  const GUARD = 'UNEXPECTED_TOOL_DETECTED';
+  // Keeps comment lines: the dialog trigger is a (MSG, ...) comment.
+  const lines = (g) => g.split(/\r?\n/).map((l) => l.trim().replace(/^\$keepout_off\s+/, '')).filter(Boolean);
+
+  test('no tool sensor configured: no check, no dialog', () => {
+    const p = program(WITHOUT, 0, 1);
+    assert.ok(!p.includes(GUARD) && !p.includes('o250'));
+    assert.doesNotMatch(p, /M66 P\d+ L0/);
+  });
+
+  test('every change that starts from T0 checks: rack tool, manual tool and probe', () => {
+    const cfg = buildInitialConfig({ ...BASE, ...SENSOR, probe: PROBE });
+    for (const to of [1, 3, 4, 99]) {
+      assert.ok(program(cfg, 0, to).includes(GUARD), `T0 -> T${to}`);
+    }
+  });
+
+  test('changes that already know what is in the spindle never check', () => {
+    const cfg = buildInitialConfig({ ...BASE, ...SENSOR, probe: PROBE });
+    for (const [from, to] of [[1, 2], [2, 1], [1, 0], [4, 5], [4, 1], [1, 4], [99, 0], [0, 0]]) {
+      assert.ok(!program(cfg, from, to).includes(GUARD), `T${from} -> T${to}`);
+    }
+  });
+
+  test('reads the sensor with an immediate read, and treats LOW as "tool present"', () => {
+    const p = program(WITH, 0, 1);
+    assert.ok(p.includes('M66 P1 L0 Q0'), 'immediate read of the tool sensor pin');
+    assert.ok(p.includes('o250 if [#5399 EQ 0]'), 'present reads LOW, same convention as the tool checks');
+  });
+
+  test('the check comes before the rack extends and before any rack motion', () => {
+    const cfg = buildInitialConfig({ ...BASE, ...SENSOR, ...RACK });
+    const l = lines(program(cfg, 0, 1));
+    const read = l.indexOf('M66 P1 L0 Q0');
+    const extend = l.indexOf('M64 P3');
+    const firstXY = l.findIndex((x) => /^G53 G0 X/.test(x));
+    assert.ok(read !== -1 && extend !== -1);
+    assert.ok(read < extend, 'no dialog with the rack out');
+    assert.ok(read < firstXY || l.indexOf('o250 if [#5399 EQ 0]') < firstXY, 'nothing moves before the read');
+  });
+
+  test('dialog flow: park, dialog, Continue opens the drawbar, second dialog, Continue, then back to the start', () => {
+    const l = lines(program(WITH, 0, 1));
+    const start = l.indexOf('o250 if [#5399 EQ 0]');
+    const end = l.indexOf('o250 endif');
+    assert.ok(start !== -1 && end > start);
+    const block = l.slice(start, end);
+    const msg = block.findIndex((x) => x.includes(GUARD));
+    const firstM0 = block.indexOf('M0');
+    const unclamp = block.indexOf('M64 P2');
+    const remove = block.findIndex((x) => x.includes('UNEXPECTED_TOOL_REMOVE'));
+    const secondM0 = block.indexOf('M0', firstM0 + 1);
+    assert.ok(msg > 0 && firstM0 > msg, 'dialog, then pause');
+    assert.ok(unclamp > firstM0, 'the drawbar opens only after the first Continue');
+    const wait = block.indexOf('G4 P5');
+    assert.ok(wait > firstM0 && wait < unclamp, 'a 5 s hold-the-tool delay sits between Continue and the release');
+    assert.ok(remove > unclamp && secondM0 > remove, 'then a second dialog asks for the tool to be taken out');
+    assert.ok(block.slice(0, msg).some((x) => /^G53 G0 X321 Y-966$/.test(x)), 'parks at the manual station first');
+    const back = block.slice(secondM0 + 1).filter((x) => /^G53 G0 X/.test(x));
+    assert.ok(back.length > 0 && back[back.length - 1] === 'G53 G0 X60 Y120', 'ends back at the starting point');
+  });
+
+  test('the delay before the drawbar opens follows the configured Countdown, kept within 1-30 s', () => {
+    const delay = (countdownSec) => {
+      const cfg = buildInitialConfig({ ...BASE, ...SENSOR, dialogBehavior: { countdownSec } });
+      const block = lines(program(cfg, 0, 1));
+      const firstM0 = block.indexOf('M0', block.indexOf('o250 if [#5399 EQ 0]'));
+      return block.slice(firstM0).find((x) => /^G4 P\d+$/.test(x));
+    };
+    assert.equal(delay(8), 'G4 P8');
+    assert.equal(delay(1), 'G4 P1');
+    assert.equal(delay(99), 'G4 P30', 'capped at the dialog setting maximum');
+    assert.equal(delay(0), 'G4 P1', 'never zero: that would be no time to get a hand on the tool');
+    // An unsanitized settings object has no dialogBehavior at all.
+    const raw = { ...BASE, ...SENSOR };
+    assert.ok(program(raw, 0, 1).includes('G4 P5'));
+  });
+
+  test('the trips go around the rack, not straight through it', () => {
+    // Slots run from Y=40 downward at X=-115, so a straight run along Y=-40
+    // from the east to a manual station in the west goes through the rack.
+    const cfg = buildInitialConfig({ ...BASE, ...SENSOR, manualTool: { x: -300, y: -40 } });
+    const l = lines(buildToolChangeProgram(cfg, 0, 1, { x: 0, y: 0 }, 0, { x: 60, y: -40 }).join('\n'));
+    const start = l.indexOf('o250 if [#5399 EQ 0]');
+    const msgIdx = l.findIndex((x) => x.includes(GUARD));
+    const there = l.slice(start, msgIdx).filter((x) => /^G53 G0 X/.test(x));
+    assert.ok(there.length >= 2, `expected a detour, got: ${there.join(' | ')}`);
+    assert.equal(there[there.length - 1], 'G53 G0 X-300 Y-40');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M64/M65 act the moment the line is read, not when queued motion reaches it.
+// A clamp or unclamp straight after a move therefore fires BEFORE that move
+// happens. With the taper blow on, the unload lifted off the holder and then
+// closed the drawbar with nothing in between, so it closed while the spindle
+// was still down at the holder and gripped the tool it had just released.
+// ---------------------------------------------------------------------------
+describe('clamp and unclamp never fire straight after a move (planner sync)', () => {
+  const BASE = {
+    slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: 0,
+    clampAuxOutput: 2, toolsetter: { x: 300, y: -200 }, manualTool: { x: 321, y: -966 }, tlsMode: 'always',
+  };
+  const PROBE = { enabled: true, toolNumber: 99, x: 300, y: -500, z: -100, holding: 'Cup' };
+  const ORIGIN = { x: 60, y: 120 };
+  const program = (s, from, to) => buildToolChangeProgram(s, from, to, { x: 0, y: 0 }, 0, ORIGIN).join('\n');
+  const body = (g) => g.split(/\r?\n/).map((l) => l.trim().replace(/^\$keepout_off\s+/, '')).filter((l) => l && !l.startsWith('('));
+  const isMotion = (l) => /^G53 G[01]\b/.test(l) || /^G0?[01]\b/.test(l);
+  const isClampLine = (l) => /^M6[45] P2$/.test(l);
+
+  // Every line that switches the clamp output, with the line before it.
+  const offenders = (g) => {
+    const l = body(g);
+    return l.map((x, i) => (isClampLine(x) && i > 0 && isMotion(l[i - 1]) ? `${l[i - 1]}  ->  ${x}` : null)).filter(Boolean);
+  };
+
+  const cases = [];
+  for (const rackHolding of ['Cup', 'Fork'])
+    for (const taperBlow of [false, true])
+      for (const withProbe of [false, true])
+        cases.push({ rackHolding, taperBlow, withProbe });
+
+  test('no clamp output change directly follows a motion line, in any unload, load or swap', () => {
+    for (const c of cases) {
+      const cfg = buildInitialConfig({ ...BASE, rackHolding: c.rackHolding, taperBlow: c.taperBlow,
+        ...(c.withProbe ? { probe: PROBE } : {}) });
+      const moves = [[0, 1], [1, 0], [1, 2], [2, 1], [1, 4], [4, 1], [0, 4], [4, 0], [4, 5]];
+      if (c.withProbe) moves.push([0, 99], [99, 0], [99, 1], [1, 99]);
+      for (const [from, to] of moves) {
+        const bad = offenders(program(cfg, from, to));
+        assert.deepEqual(bad, [], `${c.rackHolding} taper=${c.taperBlow} probe=${c.withProbe} T${from}->T${to}`);
+      }
+    }
+  });
+
+  test('taper blow: the lift off the holder finishes (G4 P0) before the drawbar closes', () => {
+    for (const rackHolding of ['Cup', 'Fork']) {
+      const cfg = buildInitialConfig({ ...BASE, rackHolding, taperBlow: true });
+      const l = body(buildUnloadTool(cfg, 1, calculateSlotPosition(cfg, 1), ORIGIN));
+      const lift = l.indexOf(`G53 G0 Z${cfg.slot1.z + 20}`);
+      const clamp = l.indexOf('M65 P2');
+      assert.ok(lift !== -1 && clamp > lift, `${rackHolding}: lift then clamp`);
+      assert.equal(l[lift + 1], 'G4 P0', `${rackHolding}: planner sync between the lift and the clamp`);
+      assert.equal(l[lift + 2], 'M65 P2');
+    }
+  });
+
+  test('taper blow: the same holds when the probe is put back in its holder', () => {
+    const cfg = buildInitialConfig({ ...BASE, taperBlow: true, probe: PROBE });
+    const l = body(program(cfg, 99, 0));
+    const lift = l.indexOf(`G53 G0 Z${PROBE.z + 20}`);
+    assert.ok(lift !== -1);
+    assert.equal(l[lift + 1], 'G4 P0');
+    assert.equal(l[lift + 2], 'M65 P2');
   });
 });
