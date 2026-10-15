@@ -1785,19 +1785,46 @@
         </div>
 
         <div class="pa-card" id="pa-adv-taper-blow-card">
-          <h3 class="pa-card-title">Taper Blow / Cone Clean</h3>
+          <h3 class="pa-card-title">Close Drawbar Between Slots</h3>
           <p class="pa-card-help">
-            Turn this on if the spindle's taper-blow port is plumbed off the drawbar valve, so air blasts through the collet whenever the drawbar is open (this is how the Sienci kit is plumbed). The sequence then closes the drawbar as soon as it lifts off an unloaded holder, so the blow isn't hissing across the whole traverse to the next slot, opens it again directly above the next holder, waits 0.8 s for the air to vent and blow the taper, and feeds the last 20 mm down slowly with the blow running to clear chips off the holder. Leave it off if nothing is connected to the blow port: the drawbar then stays open between slots, which costs nothing when no air is venting.
+            Closes the drawbar after lifting off a holder and opens it again just above the next one, so no air is used while the spindle moves between slots. When the spindle's taper blow shares the drawbar's air, it runs as the drawbar opens: the sequence waits 0.8 s, then feeds the last 20 mm down slowly so the air clears chips off the taper and the holder. Off: the drawbar stays open from one slot to the next.
           </p>
           <div class="pa-field-inline">
             <label for="pa-adv-taper-blow">
-              Taper blow / cone clean
-              <span class="pa-help-tip" title="On: close the drawbar after lifting off an unloaded holder, re-open it above the next holder, vent for 0.8 s, then feed the last 20 mm down at 1500 mm/min with the blow running. Fixed on for the Sienci ATC profile.">?</span>
+              Close drawbar between slots
+              <span class="pa-help-tip" title="On: close the drawbar after lifting off a holder, open it above the next holder, wait 0.8 s, then feed the last 20 mm down at 1500 mm/min with the air running.">?</span>
             </label>
             <label class="pa-toggle">
               <input type="checkbox" id="pa-adv-taper-blow">
               <span class="pa-toggle-slider"></span>
             </label>
+          </div>
+        </div>
+
+        <div class="pa-card" id="pa-adv-sensors">
+          <h3 class="pa-card-title">Tool Sensors</h3>
+          <p class="pa-card-help">
+            Checks the tool change runs against the machine itself. Leave a pin on <em>N/A</em> and that check is simply not made — nothing is armed until you pick a pin. Each fault stops the program with a dialog; the sensor is not read again when you continue.
+          </p>
+
+          <div class="pa-form-row">
+            <label class="pa-form-label" for="pa-adv-input-drawbar">
+              Drawbar Sensor
+              <span class="pa-help-tip" title="Switch on the drawbar cylinder that reports when the drawbar is open. Checked after every release (it must open) and after every clamp (it must close), so a drawbar that never moved is caught before the spindle lifts or slides. This is also what catches a loss of air if you have no pressure switch.">?</span>
+            </label>
+            <select id="pa-adv-input-drawbar" class="pa-select pa-adv-pin">
+              <option value="">N/A</option>
+            </select>
+          </div>
+
+          <div class="pa-form-row">
+            <label class="pa-form-label" for="pa-adv-input-toolsense">
+              Tool Sensor
+              <span class="pa-help-tip" title="Senses a tool held in the spindle (pull stud / spindle proximity). Checked after a pickup, where a tool must be present, and after a drop-off, where the spindle must be empty. Must be its own input — if you point this at the drawbar switch the readings will be wrong.">?</span>
+            </label>
+            <select id="pa-adv-input-toolsense" class="pa-select pa-adv-pin">
+              <option value="">N/A</option>
+            </select>
           </div>
         </div>
 
@@ -1836,33 +1863,6 @@
               <option value="600">10 minutes</option>
               <option value="900">15 minutes</option>
               <option value="1200">20 minutes</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="pa-card" id="pa-adv-sensors">
-          <h3 class="pa-card-title">Tool Sensors</h3>
-          <p class="pa-card-help">
-            Checks the tool change runs against the machine itself. Leave a pin on <em>N/A</em> and that check is simply not made — nothing is armed until you pick a pin. Each fault stops the program with a dialog; the sensor is not read again when you continue.
-          </p>
-
-          <div class="pa-form-row">
-            <label class="pa-form-label" for="pa-adv-input-drawbar">
-              Drawbar Sensor
-              <span class="pa-help-tip" title="Switch on the drawbar cylinder that reports when the drawbar is open. Checked after every release (it must open) and after every clamp (it must close), so a drawbar that never moved is caught before the spindle lifts or slides. This is also what catches a loss of air if you have no pressure switch.">?</span>
-            </label>
-            <select id="pa-adv-input-drawbar" class="pa-select pa-adv-pin">
-              <option value="">N/A</option>
-            </select>
-          </div>
-
-          <div class="pa-form-row">
-            <label class="pa-form-label" for="pa-adv-input-toolsense">
-              Tool Sensor
-              <span class="pa-help-tip" title="Senses a tool held in the spindle (pull stud / spindle proximity). Checked after a pickup, where a tool must be present, and after a drop-off, where the spindle must be empty. Must be its own input — if you point this at the drawbar switch the readings will be wrong.">?</span>
-            </label>
-            <select id="pa-adv-input-toolsense" class="pa-select pa-adv-pin">
-              <option value="">N/A</option>
             </select>
           </div>
         </div>
