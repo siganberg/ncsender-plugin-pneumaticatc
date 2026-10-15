@@ -1801,6 +1801,45 @@
           </div>
         </div>
 
+        <div class="pa-card" id="pa-adv-water-pump-card">
+          <h3 class="pa-card-title">Spindle Water Pump</h3>
+          <p class="pa-card-help">
+            For a water-cooled spindle whose pump is wired to a Wireless I/O output. The Wireless I/O switches the pump on when the spindle starts and off once the spindle has been stopped for the idle time below, so the pump isn't left running while the machine sits idle. It does this on its own, from the spindle speed ncSender sends it, even outside a tool change. Use a different output from the clamp valve.
+          </p>
+          <div class="pa-field-inline">
+            <label for="pa-adv-water-pump">
+              Water pump on a Wireless I/O output
+              <span class="pa-help-tip" title="On: the chosen Wireless I/O output turns on when the spindle starts and off once the spindle has been stopped for the idle time. Switching the output on by hand while the spindle is stopped also runs it for the idle time. Off: the output has no automatic behaviour.">?</span>
+            </label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-adv-water-pump">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="pa-form-row" id="pa-adv-water-pump-row" style="display: none">
+            <label class="pa-form-label" for="pa-adv-water-pump-output">Pump Output</label>
+            <select id="pa-adv-water-pump-output" class="pa-select">
+              <option value="bridge:0">Wireless I/O OUT1</option>
+              <option value="bridge:1">Wireless I/O OUT2</option>
+              <option value="bridge:2">Wireless I/O OUT3</option>
+              <option value="bridge:3">Wireless I/O OUT4</option>
+            </select>
+          </div>
+          <div class="pa-form-row" id="pa-adv-water-pump-idle-row" style="display: none">
+            <label class="pa-form-label" for="pa-adv-water-pump-idle">
+              Off After Idle
+              <span class="pa-help-tip" title="How long the spindle has to be stopped before the pump switches off. 30 seconds is for testing the wiring.">?</span>
+            </label>
+            <select id="pa-adv-water-pump-idle" class="pa-select">
+              <option value="30">30 seconds</option>
+              <option value="300">5 minutes</option>
+              <option value="600">10 minutes</option>
+              <option value="900">15 minutes</option>
+              <option value="1200">20 minutes</option>
+            </select>
+          </div>
+        </div>
+
         <div class="pa-card" id="pa-adv-sensors">
           <h3 class="pa-card-title">Tool Sensors</h3>
           <p class="pa-card-help">
@@ -3039,6 +3078,14 @@
     var savedToolSense = initialConfig.toolSensorInput;
     setPinValue('pa-adv-input-toolsense', (typeof savedToolSense === 'number' && savedToolSense >= 0) ? savedToolSense : '');
     $('pa-adv-taper-blow').checked = !!initialConfig.taperBlow;
+    (function() {
+      var pump = String(initialConfig.waterPumpOutput || '');
+      var on = /^bridge:[0-3]$/.test(pump);
+      $('pa-adv-water-pump').checked = on;
+      if (on) $('pa-adv-water-pump-output').value = pump;
+      $('pa-adv-water-pump-idle').value = String(initialConfig.waterPumpIdleSec || 600);
+      showWaterPumpRow();
+    })();
 
     // Profile last, so it can lock/overwrite the pin fields it owns. Silent:
     // restoring saved state isn't a user edit.
@@ -3192,6 +3239,39 @@
   }
 
   // ---------- Save ----------
+  function showWaterPumpRow() {
+    var row = $('pa-adv-water-pump-row');
+    if (row) row.style.display = $('pa-adv-water-pump').checked ? '' : 'none';
+    var idleRow = $('pa-adv-water-pump-idle-row');
+    if (idleRow) idleRow.style.display = $('pa-adv-water-pump').checked ? '' : 'none';
+  }
+  $('pa-adv-water-pump').addEventListener('change', showWaterPumpRow);
+
+  // The Wireless I/O keeps each output's role (drawbar, pump or none) itself.
+  // Send all four on save so a change takes effect now, not at the next tool
+  // change, and an output that lost its role is cleared. Best effort: an
+  // unpaired bridge just gets them from the next tool change's setup.
+  async function pushBridgeRoles(payload) {
+    if (!bridgePaired) return;
+    var lines = [];
+    if (payload.waterPumpOutput) lines.push('pumpidle ' + payload.waterPumpIdleSec);
+    for (var n = 0; n < 4; n += 1) {
+      var v = 'bridge:' + n;
+      lines.push('role ' + n + ' ' + (String(payload.clampAuxOutput) === v ? 'drawbar' : payload.waterPumpOutput === v ? 'pump' : 'none'));
+    }
+    for (var i = 0; i < lines.length; i += 1) {
+      try {
+        await fetch(BASE_URL + '/api/dongle/devices/xio/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payload: lines[i] })
+        });
+      } catch (e) {
+        console.warn('[PneumaticATC] "' + lines[i] + '" not sent', e);
+      }
+    }
+  }
+
   function parseAuxValue(sel) {
     if (!sel) return -1;
     var v = sel.value;
@@ -3246,6 +3326,10 @@
       })(),
       // Taper blow / cone clean plumbed off the drawbar valve.
       taperBlow: $('pa-adv-taper-blow').checked,
+      // Wireless I/O output running the spindle's water pump ('' = none). The
+      // Wireless I/O itself switches it from the spindle speed (role <n> pump).
+      waterPumpOutput: $('pa-adv-water-pump').checked ? $('pa-adv-water-pump-output').value : '',
+      waterPumpIdleSec: parseInt($('pa-adv-water-pump-idle').value, 10) || 600,
       rackHolding: $('pa-rack-holding').value || 'Fork',
 
       orientation: segOrientation ? segOrientation.get() : 'Y',
@@ -3459,12 +3543,15 @@
 
   async function doSave() {
     var payload = gatherFormData();
+    if (payload.waterPumpOutput && payload.waterPumpOutput === String(payload.clampAuxOutput))
+      throw new Error('the water pump and the clamp valve are on the same Wireless I/O output. Pick another pump output.');
     var res = await fetch(BASE_URL + '/api/plugins/com.ncsender.pneumaticatc/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error('save failed: ' + res.status);
+    await pushBridgeRoles(payload);
 
     // Tool-count sync is universal — both community and Pro editions
     // expose /api/settings and the `tool` key. If this fails the plugin

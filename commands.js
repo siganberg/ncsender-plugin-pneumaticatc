@@ -295,6 +295,14 @@ const buildInitialConfig = (raw = {}) => {
     // Taper blow / cone clean plumbed off the drawbar valve (Sienci kit).
     // See DEDUST_* above for what it changes in the sequence.
     taperBlow: !!raw.taperBlow,
+    // Wireless I/O output running the spindle's water pump ('' = none). The
+    // bridge switches it from the spindle speed on its own (role <n> pump);
+    // never the clamp output, which keeps the drawbar role.
+    waterPumpOutput: /^bridge:[0-3]$/.test(String(raw.waterPumpOutput ?? '')) && String(raw.waterPumpOutput) !== String(raw.clampAuxOutput)
+      ? String(raw.waterPumpOutput) : '',
+    // Spindle stopped this long before the pump switches off (the choices the
+    // Advanced tab offers; 30 s is for testing).
+    waterPumpIdleSec: [30, 300, 600, 900, 1200].includes(Number(raw.waterPumpIdleSec)) ? Number(raw.waterPumpIdleSec) : 600,
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -537,6 +545,13 @@ const OUTPUT_PROVIDERS = [
     },
   },
 ];
+
+// The pump role is stored on the bridge; resent with every tool change like the
+// drawbar role, so a replaced or reset bridge picks it up.
+function waterPumpSetup(settings) {
+  const m = /^bridge:([0-3])$/.exec(settings.waterPumpOutput || '');
+  return m ? `(DONGLE:${BRIDGE_DEVICE}:pumpidle ${settings.waterPumpIdleSec})\n(DONGLE:${BRIDGE_DEVICE}:role ${m[1]} pump)` : '';
+}
 
 const NO_OUTPUT = { on: '', off: '', setup: '', device: null, isRelease: () => false };
 
@@ -2232,6 +2247,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   const gcode = `
     (Start of PneumaticATC Plugin Sequence)
     ${outputFor(settings.clampAuxOutput).setup}
+    ${waterPumpSetup(settings)}
     ${modalSafe(preCmd, 'pre')}
     #<return_units> = [20 + #<_metric>]
     G21

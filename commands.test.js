@@ -2835,6 +2835,28 @@ describe('Wireless I/O clamp output', () => {
     assert.ok(role > start && role < lines.indexOf('(DONGLE:xio:out 0 1)'), 'drawbar role assigned before the first release');
   });
 
+  test('keeps a water-pump output, but never the clamp output', () => {
+    assert.equal(settings.waterPumpOutput, '');
+    assert.equal(buildInitialConfig({ clampAuxOutput: 'bridge:0', waterPumpOutput: 'bridge:2' }).waterPumpOutput, 'bridge:2');
+    assert.equal(buildInitialConfig({ clampAuxOutput: 'bridge:0', waterPumpOutput: 'bridge:0' }).waterPumpOutput, '');
+    assert.equal(buildInitialConfig({ waterPumpOutput: 'bridge:7' }).waterPumpOutput, '');
+    assert.equal(settings.waterPumpIdleSec, 600);
+    assert.equal(buildInitialConfig({ waterPumpIdleSec: 30 }).waterPumpIdleSec, 30);
+    assert.equal(buildInitialConfig({ waterPumpIdleSec: 45 }).waterPumpIdleSec, 600);
+  });
+
+  test('assigns the pump role at the start of the change when a pump output is set', () => {
+    setBridge(true);
+    assert.ok(!runM6().some((l) => /role \d pump/.test(l)), 'no pump role without a pump output');
+    const commands = [{ command: 'M6 T1', isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 2, mpos: { x: 10, y: 20 } }, tools: [] },
+      { ...settings, waterPumpOutput: 'bridge:2', waterPumpIdleSec: 300 });
+    const lines = commands.map((c) => c.command.trim()).join('\n').split('\n').map((l) => l.trim());
+    const pump = lines.indexOf('(DONGLE:xio:role 2 pump)');
+    assert.ok(pump > lines.indexOf('(Start of PneumaticATC Plugin Sequence)') && pump < lines.indexOf('(DONGLE:xio:out 0 1)'));
+    assert.equal(lines[pump - 1], '(DONGLE:xio:pumpidle 300)', 'idle time set before the role');
+  });
+
   test('refuses the change when the bridge is offline or not paired', () => {
     for (const state of [false, null]) {
       setBridge(state);
