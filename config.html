@@ -1820,7 +1820,7 @@
           <div class="pa-form-row">
             <label class="pa-form-label" for="pa-adv-input-toolsense">
               Tool Sensor
-              <span class="pa-help-tip" title="Senses a tool held in the spindle (pull stud / spindle proximity). Checked after a pickup, where a tool must be present, and after a drop-off, where the spindle must be empty. Must be its own input — if you point this at the drawbar switch the readings will be wrong.">?</span>
+              <span class="pa-help-tip" title="Senses a tool held in the spindle (pull stud / spindle proximity). Checked after a pickup, where a tool must be present, and after a drop-off, where the spindle must be empty. On a Wireless I/O input it is also watched while the machine is idle: take the tool out by hand and the tool is set to none (M61 Q0); fit one into an empty spindle and ncSender asks which tool it is. Must be its own input — if you point this at the drawbar switch the readings will be wrong.">?</span>
             </label>
             <select id="pa-adv-input-toolsense" class="pa-select pa-adv-pin">
               <option value="">N/A</option>

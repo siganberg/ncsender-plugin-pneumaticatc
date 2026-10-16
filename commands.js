@@ -228,7 +228,7 @@ const buildInitialConfig = (raw = {}) => {
   const slot1Raw = raw.slot1 || raw.pocket1 || {};
   const slot1Z = raw.slot1Z ?? raw.pocket1Z ?? slot1Raw.z ?? -100;
 
-  return {
+  const config = {
     slots,
     layoutMode: sanitizeLayoutMode(raw.layoutMode),
     orientation: sanitizeOrientation(raw.orientation),
@@ -309,6 +309,10 @@ const buildInitialConfig = (raw = {}) => {
       chainSteps: !!raw.dialogBehavior?.chainSteps
     }
   };
+  // The tool sensor watch runs on a timer, outside any call that hands it
+  // the settings.
+  _watchSettings = config;
+  return config;
 };
 
 // === Tool offset lookup ===
@@ -2423,6 +2427,37 @@ function buildSlotNav(settings, slotNum, origin = { x: 0, y: 0 }) {
   `.trim();
 }
 
+// $PROBE: move over the probe holder at Z-safe, the probe's counterpart of
+// $SLOTn, to check the holder position. Nothing is picked up (that is
+// M6 T<probe number>). Same routing as the put-down, minus the descent:
+// a fork is entered from its slide-out point, so the move stays clear of
+// the fork arms even at Z-safe.
+function buildProbeNav(settings, origin = { x: 0, y: 0 }) {
+  const h = probeHolderPosition(settings);
+  const entrance = h.cup
+    ? probeRoute(origin, h.engaged, settings)
+    : `${probeRoute(origin, h.approach, settings)}
+       G53 G0 X${h.engaged.x} Y${h.engaged.y}`;
+  return `
+    G53 G21 G90 G0 Z${settings.zSafe}
+    ${sienciKeepout(settings).off}
+    ${entrance}
+  `.trim();
+}
+
+function handleProbeNavCommand(commands, context, settings) {
+  const idx = commands.findIndex((c) => c.isOriginal && c.command.trim().toUpperCase() === '$PROBE');
+  if (idx === -1) return;
+  // No holder set up: leave it alone, like an out-of-range $SLOT.
+  if (!(settings.probe && settings.probe.enabled)) return;
+  const origin = {
+    x: context?.machineState?.mpos?.x ?? 0,
+    y: context?.machineState?.mpos?.y ?? 0,
+  };
+  const program = formatGCode(buildProbeNav(settings, origin));
+  expandIntoCommands(commands, idx, commands[idx].command, program, settings);
+}
+
 function handleSlotCommand(commands, context, settings) {
   const idx = commands.findIndex((c) => {
     if (!c.isOriginal) return false;
@@ -2540,10 +2575,237 @@ function gateSpindleUnclamp(commands, context, settings) {
   }
 }
 
+// === Tool sensor watch ===
+//
+// Outside a tool change the controller only knows the tool it was told
+// (M6, M61). Open the drawbar by hand and drop the tool, or fit one, and it
+// is out of step with the spindle. With the Tool Sensor on a Wireless I/O
+// input ncSender sees that input change live, so the plugin keeps the two
+// in step:
+//   * spindle empty while the controller says T3: M61 Q0, at once;
+//   * a tool fitted into an empty spindle (sensor OFF -> ON) while the
+//     controller says T0: ask which tool it is, then M61 Q<id>.
+// Only while the machine is idle and no tool change is running (a change
+// drops and fits tools itself and sets M61 as it goes). A wired input
+// can't be watched: the controller only reads it on M66, which would cut
+// into whatever is running.
+//
+// The empty side is a state check, not an edge: it also catches a tool
+// that came out while a job was paused or the machine was in alarm, once
+// the machine is idle again. The fitted side is an edge: a tool that is
+// simply there at start-up is not asked about.
+const SENSOR_POLL_MS = 250;
+const SENSOR_SETTLE_MS = 750;   // a reading must hold this long to count
+const M61_RETRY_MS = 3000;      // wait this long for the controller to report T0
+let _watchSettings = null;
+let _toolChangeActive = false;
+const _watch = { raw: null, rawSince: 0, settled: null, m61At: 0, ask: null, lastOut: null };
+
+function bridgeInputIndex(value) {
+  const m = /^bridge:([0-3])$/.exec(String(value ?? ''));
+  return m ? Number(m[1]) : -1;
+}
+
+// 1 / 0 from the Wireless I/O's last status (in<n>=…), null when unknown.
+function readBridgeInput(n) {
+  const dongle = typeof pluginContext !== 'undefined' ? pluginContext.dongle : null;
+  if (!dongle || typeof dongle.getDevices !== 'function') return null;
+  const device = Array.from(dongle.getDevices() || []).find((d) => d && d.name === BRIDGE_DEVICE);
+  if (!device || !device.connected || !device.lastMessage) return null;
+  const m = new RegExp('\\bin' + n + '=([01])\\b').exec(String(device.lastMessage));
+  return m ? Number(m[1]) : null;
+}
+
+function closeToolAsk() {
+  if (!_watch.ask) return;
+  if (typeof pluginContext.closeDialog === 'function') pluginContext.closeDialog(_watch.ask);
+  _watch.ask = null;
+}
+
+const TOOL_TYPE_LABELS = {
+  flat: 'Flat', ball: 'Ball', 'v-bit': 'V-bit', 'thread-mill': 'Thread mill',
+  surfacing: 'Surfacing', chamfer: 'Chamfer', drill: 'Drill', probe: 'Probe',
+};
+
+function toolMeta(t) {
+  const type = TOOL_TYPE_LABELS[t.type] || (t.type ? String(t.type) : '');
+  const dia = Number(t.diameter) >= 0.01 ? `Ø${+Number(t.diameter).toFixed(3)} mm` : '';
+  return [dia, type].filter(Boolean).join(' · ');
+}
+
+// The question shown when a tool goes into an empty spindle by hand. The
+// tools look like the tool buttons on the main screen: a filled rounded
+// button with the SLOT pill on its left edge (the probe's pill carries its
+// icon; any other tool is a plain button), widened to carry the bit's name. Rack slots first in
+// slot order, then the other tools, then the probe. Tap one to pick it, then
+// Set. `picked` is preselected (the tool that just came out, if any).
+// Divs, not buttons: the plugin dialog paints every <button> as a primary.
+// `tools`: [{ id, name, slot, diameter, type }]; `slots`: rack size.
+function toolAskHtml(tools, slots = 0, picked = null) {
+  const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const inRack = (t) => t.type !== 'probe' && t.slot > 0 && t.slot <= slots;
+  const ordered = [
+    ...tools.filter(inRack).sort((a, b) => a.slot - b.slot),
+    ...tools.filter((t) => !inRack(t) && t.type !== 'probe').sort((a, b) => a.id - b.id),
+    ...tools.filter((t) => t.type === 'probe').sort((a, b) => a.id - b.id),
+  ];
+  const probeIcon = '<svg class="ts-pi" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="2" width="10" height="6" rx="1.5"/><rect x="10" y="8" width="4" height="9"/><circle cx="12" cy="19.5" r="2.5"/></svg>';
+  const pill = (t) => t.type === 'probe'
+    ? `<span class="ts-pill">${probeIcon}<span class="ts-pw">PROBE</span></span>`
+    : inRack(t)
+      ? `<span class="ts-pill"><span class="ts-pw">SLOT</span><span class="ts-pn">${t.slot}</span></span>`
+      : '';
+  const isPicked = (t) => picked !== null && t.id === picked;
+  const card = (t) => `
+      <div role="button" tabindex="0" class="ts-tb${pill(t) ? '' : ' ts-tb--plain'}${isPicked(t) ? ' active' : ''}" data-id="${t.id}" data-sum="${esc([t.name, toolMeta(t)].filter(Boolean).join(' · '))}">
+        ${pill(t)}
+        <span class="ts-txt"><span class="ts-tid">Tool ${t.id}</span><span class="ts-tnm">${esc(t.name) || '&nbsp;'}</span></span>
+      </div>`;
+  const first = ordered.find(isPicked);
+  const body = ordered.length
+    ? `<div class="ts-grid">${ordered.map(card).join('')}</div>`
+    : '<div class="ts-empty">The tool library is empty. Add the tool there, or type <code>M61 Q</code> and its Tool ID in the console.</div>';
+  return `
+    <style>
+      .ts-wrap { padding: 18px 20px; width: 780px; max-width: 100%; box-sizing: border-box; color: var(--color-text-primary, #e0e0e0); }
+      .ts-wrap * { box-sizing: border-box; }
+      .ts-wrap .ts-lead { margin: 0 0 14px; color: var(--color-text-secondary, #9aa4ad); }
+      .ts-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; max-height: 56vh; overflow-y: auto; padding: 2px; }
+      .ts-tb { position: relative; display: flex; align-items: center; min-height: 56px; padding: 8px 12px 8px 54px; border-radius: var(--radius-small, 10px); background: var(--color-surface-muted, #1a1f26); box-shadow: inset 0 0 0 1px var(--color-border, rgba(255,255,255,0.1)); overflow: hidden; cursor: pointer; user-select: none; transition: background .15s ease; }
+      .ts-tb--plain { padding-left: 14px; }
+      .ts-tb.active { background: var(--color-accent, #4065E7); color: #fff; }
+      .ts-pill { position: absolute; left: 0; top: 0; bottom: 0; width: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; line-height: 1; background: color-mix(in srgb, var(--color-text-primary, #e0e0e0) 10%, transparent); color: var(--color-text-secondary, #9aa4ad); }
+      .ts-tb.active .ts-pill { background: rgba(255,255,255,0.22); color: #fff; }
+      .ts-pw { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.04em; }
+      .ts-pn { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .ts-pi { width: 18px; height: 18px; margin-bottom: 2px; }
+      .ts-txt { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+      .ts-tid { font-size: 1.02rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .ts-tnm { font-size: 0.8rem; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ts-empty { padding: 14px; border-radius: var(--radius-small, 10px); background: var(--color-surface-muted, #1a1f26); }
+      .ts-foot { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+      .ts-sum { flex: 1; min-width: 0; font-size: 0.9rem; color: var(--color-text-secondary, #9aa4ad); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ts-btn { padding: 12px 24px; border-radius: var(--radius-small, 10px); font-weight: 600; cursor: pointer; user-select: none; }
+      .ts-skip { background: var(--color-surface-muted, #1a1f26); box-shadow: inset 0 0 0 1px var(--color-border, rgba(255,255,255,0.1)); }
+      .ts-set { background: var(--color-accent, #4065E7); color: #fff; }
+      .ts-set.off { opacity: 0.4; cursor: default; }
+      @media (max-width: 820px) { .ts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    </style>
+    <div class="ts-wrap">
+      <p class="ts-lead">A tool was fitted by hand. Pick it so the controller knows which tool is in the spindle. Measure it (TLS) before you cut.</p>
+      ${body}
+      <div class="ts-foot">
+        <span class="ts-sum">${first ? esc([first.name, toolMeta(first)].filter(Boolean).join(' · ')) : ''}</span>
+        <div role="button" tabindex="0" class="ts-btn ts-skip">Skip</div>
+        <div role="button" tabindex="0" class="ts-btn ts-set${first ? '' : ' off'}">${first ? `Set Tool ${first.id}` : 'Set'}</div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var picked = ${first ? first.id : 'null'};
+        var set = document.querySelector('.ts-set');
+        var sum = document.querySelector('.ts-sum');
+        var send = function (data) { window.parent.postMessage({ type: 'close-plugin-dialog', data: data }, '*'); };
+        var press = function (el, fn) {
+          el.addEventListener('click', fn);
+          el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } });
+        };
+        document.querySelectorAll('.ts-tb').forEach(function (b) {
+          press(b, function () {
+            document.querySelectorAll('.ts-tb.active').forEach(function (o) { o.classList.remove('active'); });
+            b.classList.add('active');
+            picked = Number(b.dataset.id);
+            set.classList.remove('off');
+            set.textContent = 'Set Tool ' + picked;
+            sum.textContent = b.dataset.sum || '';
+          });
+        });
+        press(set, function () { if (picked !== null) send({ action: 'tool', toolId: picked }); });
+        press(document.querySelector('.ts-skip'), function () { send({ action: 'skip' }); });
+      })();
+    </script>`;
+}
+
+function libraryToolIds() {
+  const raw = typeof pluginContext.getTools === 'function' ? Array.from(pluginContext.getTools() || []) : [];
+  const seen = new Set();
+  const out = [];
+  for (const t of raw) {
+    const id = t && (t.toolId ?? t.id);
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name: t.name || '', slot: Number.isInteger(t.toolNumber) ? t.toolNumber : 0, diameter: t.diameter, type: t.type || '' });
+  }
+  return out;
+}
+
+function askFittedTool() {
+  if (_watch.ask || typeof pluginContext.showDialogAsync !== 'function') return;
+  const ask = pluginContext.showDialogAsync('Which tool is in the spindle?', toolAskHtml(libraryToolIds(), (_watchSettings && _watchSettings.slots) || 0, _watch.lastOut), { closable: true, width: '840px' }, (response) => {
+    if (_watch.ask !== ask) return;
+    _watch.ask = null;
+    const id = response && response.action === 'tool' ? Number(response.toolId) : NaN;
+    if (!Number.isInteger(id) || id <= 0) return;
+    // Only if nothing changed while the dialog was open.
+    const st = pluginContext.getServerState();
+    if (_watch.settled !== 1 || !st || st.tool !== 0 || _toolChangeActive) return;
+    pluginContext.sendCommand(`M61 Q${id}`, `M61 Q${id} (Tool Sensor: T${id} fitted by hand)`);
+  });
+  _watch.ask = ask;
+}
+
+function watchToolSensor(now = Date.now()) {
+  const n = _watchSettings ? bridgeInputIndex(_watchSettings.toolSensorInput) : -1;
+  const value = n >= 0 ? readBridgeInput(n) : null;
+  if (value === null) {
+    _watch.raw = null;
+    _watch.settled = null;
+    closeToolAsk();
+    return;
+  }
+  if (value !== _watch.raw) {
+    _watch.raw = value;
+    _watch.rawSince = now;
+    return;
+  }
+  if (now - _watch.rawSince < SENSOR_SETTLE_MS) return;
+  const previous = _watch.settled;
+  _watch.settled = value;
+  if (value === 0) closeToolAsk();
+
+  const st = typeof pluginContext.getServerState === 'function' ? pluginContext.getServerState() : null;
+  const idle = !!st && st.connected === true
+    && (st.senderStatus === 'idle' || st.senderStatus === 'homing-required');
+  if (!idle || _toolChangeActive || typeof pluginContext.sendCommand !== 'function') return;
+
+  if (value === 0 && st.tool > 0) {
+    if (now - _watch.m61At < M61_RETRY_MS) return;
+    _watch.m61At = now;
+    _watch.lastOut = st.tool;
+    pluginContext.sendCommand('M61 Q0', `M61 Q0 (Tool Sensor: spindle empty, was T${st.tool})`);
+    return;
+  }
+  if (value === 1 && previous === 0 && st.tool === 0) askFittedTool();
+}
+
+if (typeof pluginContext !== 'undefined' && pluginContext && typeof pluginContext.setInterval === 'function') {
+  pluginContext.setInterval(() => watchToolSensor(), SENSOR_POLL_MS);
+}
+
+function onToolChangeStart(event, settings) {
+  _toolChangeActive = true;
+  closeToolAsk();
+}
+
 // A tool change that ended aborted (Abort / soft reset, alarm, error,
 // disconnect) may have stopped with the clamp released. Clamped is the safe
 // state, the same one air loss or the bridge's link-loss fail-safe leaves.
 function onToolChangeEnd(event, settings) {
+  _toolChangeActive = false;
+  // What the sensor read during the change is not a hand change: start the
+  // edge from what it reads now.
+  _watch.raw = null;
+  _watch.settled = null;
   if (!event || event.outcome !== 'aborted' || !settings) return;
   const output = outputFor(settings.clampAuxOutput);
   if (typeof output.onAbort === 'function') output.onAbort();
@@ -2559,15 +2821,16 @@ function onBeforeCommand(commands, context, settings) {
   handleTLSCommand(commands, context, settings);
   handleMeasureTloCommand(commands, context, settings);
   handleSlotCommand(commands, context, settings);
+  handleProbeNavCommand(commands, context, settings);
   handleM6Command(commands, context, settings);
   return commands;
 }
 
 export {
-  onBeforeCommand, onToolChangeEnd, buildInitialConfig, probeVerifyRoutine, probeVerifyGcode,
+  onBeforeCommand, onToolChangeStart, onToolChangeEnd, buildInitialConfig, watchToolSensor, toolAskHtml, probeVerifyRoutine, probeVerifyGcode,
   rackEntrance, rackExit, cupEntrance, cupExit, tlsEntrance, tlsExit,
   computeKeepoutZone, slotEntryPoint, slotApproachPoint,
-  buildLoadTool, buildUnloadTool, buildSlotNav, calculateSlotPosition,
+  buildLoadTool, buildUnloadTool, buildSlotNav, buildProbeNav, calculateSlotPosition,
   buildToolChangeProgram, parseMeasureTloCommand,
   gateSpindleUnclamp,
   createToolLengthSetRoutine, createToolLengthSetProgram,

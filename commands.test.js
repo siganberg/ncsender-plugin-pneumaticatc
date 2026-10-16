@@ -27,6 +27,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   onBeforeCommand,
+  onToolChangeStart,
+  watchToolSensor,
   onToolChangeEnd,
   buildInitialConfig,
   computeKeepoutZone,
@@ -43,6 +45,7 @@ import {
   parseMeasureTloCommand,
   buildUnloadTool,
   buildSlotNav,
+  buildProbeNav,
   calculateSlotPosition,
   gateSpindleUnclamp,
   createToolLengthSetRoutine,
@@ -3081,5 +3084,154 @@ describe('aborted tool change re-clamps a bridge clamp output', () => {
     capture();
     onToolChangeEnd({ kind: 'M6', outcome: 'aborted', reason: 'stopped' }, buildInitialConfig({ clampAuxOutput: 1 }));
     assert.deepEqual(sent, []);
+  });
+});
+
+// $PROBE: move over the probe holder at Z-safe, nothing picked up.
+describe('$PROBE — move over the probe holder', () => {
+  const base = { slots: 3, orientation: 'Y', slot1: { x: -115, y: 40, z: -120 }, slotDistance: 80,
+    slideDirection: 'Negative', slideDistance: 40, keepoutPadding: 60, zSafe: -5, clampAuxOutput: 0,
+    toolsetter: { x: 300, y: 300 } };
+  const fork = buildInitialConfig({ ...base,
+    probe: { enabled: true, toolNumber: 99, x: 200, y: -100, z: -90, holding: 'Fork', slideAxis: 'X', slideDirection: 'Negative', slideDistance: 30 } });
+  const cup = buildInitialConfig({ ...base, probe: { enabled: true, toolNumber: 99, x: 200, y: -100, z: -90, holding: 'Cup' } });
+  const run = (settings, cmd = '$PROBE') => {
+    const commands = [{ command: cmd, isOriginal: true }];
+    onBeforeCommand(commands, { machineState: { tool: 0, mpos: { x: 10, y: 20 } }, tools: [] }, { ...settings });
+    return commands.map((c) => c.command.trim());
+  };
+
+  test('fork: Z-safe first, enters from the slide-out point, ends over the holder, never descends', () => {
+    const lines = motionLines(buildProbeNav(fork, { x: 10, y: 20 }));
+    assert.equal(lines[0], 'G53 G21 G90 G0 Z-5');
+    assert.equal(lines.at(-1), 'G53 G0 X200 Y-100');
+    assert.ok(lines.includes('G53 G0 X230 Y-100') || lines.some((l) => /X230 Y-100$/.test(l)), 'passes the slide-out point');
+    assert.ok(!lines.slice(1).some((l) => /Z-?\d/.test(l) && !/Z-5\b/.test(l)), 'no Z move below Z-safe');
+  });
+
+  test('cup: goes straight over the holder at Z-safe', () => {
+    const lines = motionLines(buildProbeNav(cup, { x: 10, y: 20 }));
+    assert.equal(lines[0], 'G53 G21 G90 G0 Z-5');
+    assert.equal(lines.at(-1), 'G53 G0 X200 Y-100');
+  });
+
+  test('expands through onBeforeCommand, case-insensitive, and picks nothing up', () => {
+    const lines = run(fork, '$probe');
+    assert.ok(!lines.includes('$probe') && !lines.includes('$PROBE'), 'replaced by motion');
+    assert.ok(!lines.some((l) => /^M6|M61/.test(l)), 'no tool change');
+  });
+
+  test('probe holder disabled: left alone', () => {
+    const off = buildInitialConfig({ ...base, probe: { enabled: false } });
+    assert.deepEqual(run(off), ['$PROBE']);
+  });
+});
+
+describe('Tool sensor watch (Wireless I/O)', () => {
+  // A fake host: the bridge reports in1, the controller reports `tool`.
+  const host = (over = {}) => {
+    const h = {
+      in1: 1, tool: 3, status: 'idle', connected: true, sent: [], dialogs: [], closed: [],
+      tools: [{ id: 'a', toolId: 3, name: 'Flat 1/4' }, { id: 'b', toolId: 1, name: 'V-bit' }, { id: 'c', toolId: null, name: 'no id' }],
+      ...over,
+    };
+    globalThis.pluginContext = {
+      dongle: { getDevices: () => [{ name: 'xio', connected: h.connected, lastMessage: `status in0=0 in1=${h.in1} in2=0 in3=0` }] },
+      getServerState: () => ({ senderStatus: h.status, tool: h.tool, connected: true }),
+      sendCommand: (c) => h.sent.push(c),
+      getTools: () => h.tools,
+      showDialogAsync: (title, html, opts, cb) => { h.dialogs.push({ title, html, cb }); return 'dlg' + h.dialogs.length; },
+      closeDialog: (id) => h.closed.push(id),
+    };
+    return h;
+  };
+  // Load the plugin's settings (buildInitialConfig is what the host calls).
+  const arm = (sensor = 'bridge:1') => buildInitialConfig({ slots: 3, clampAuxOutput: 'bridge:0', toolSensorInput: sensor });
+  let t = 1_000_000;
+  // Hold a reading long enough to settle.
+  const settle = () => { watchToolSensor(t += 10); watchToolSensor(t += 1000); };
+  const fresh = () => { onToolChangeEnd({ outcome: 'completed' }, null); };
+
+  test('spindle empty while the controller has a tool: M61 Q0, once', () => {
+    const h = host(); arm(); fresh();
+    settle();                       // tool present: nothing
+    assert.deepEqual(h.sent, []);
+    h.in1 = 0;
+    settle();
+    assert.deepEqual(h.sent, ['M61 Q0']);
+    watchToolSensor(t += 250);      // controller hasn't reported T0 yet: no repeat right away
+    assert.deepEqual(h.sent, ['M61 Q0']);
+    h.tool = 0;
+    watchToolSensor(t += 5000);
+    assert.deepEqual(h.sent, ['M61 Q0']);
+  });
+
+  test('a reading has to hold before it counts', () => {
+    const h = host({ in1: 0 }); arm(); fresh();
+    watchToolSensor(t += 10);
+    watchToolSensor(t += 300);
+    assert.deepEqual(h.sent, []);
+  });
+
+  test('not while running, in a tool change, or with a wired sensor', () => {
+    let h = host({ in1: 0, status: 'running' }); arm(); fresh();
+    settle(); assert.deepEqual(h.sent, []);
+    h = host({ in1: 0 }); arm(); fresh();
+    onToolChangeStart({}, null);
+    settle(); assert.deepEqual(h.sent, []);
+    fresh();
+    h = host({ in1: 0 }); arm(5); fresh();
+    settle(); assert.deepEqual(h.sent, []);
+  });
+
+  test('empty after a pause: sent once the machine is idle again', () => {
+    const h = host({ in1: 0, status: 'hold' }); arm(); fresh();
+    settle(); assert.deepEqual(h.sent, []);
+    h.status = 'idle';
+    watchToolSensor(t += 250);
+    assert.deepEqual(h.sent, ['M61 Q0']);
+  });
+
+  test('tool fitted into an empty spindle with T0: asks which, then M61 Q<id>', () => {
+    const h = host({ in1: 0, tool: 0 }); arm(); fresh();
+    settle();
+    h.in1 = 1;
+    settle();
+    assert.equal(h.dialogs.length, 1);
+    const html = h.dialogs[0].html;
+    assert.ok(html.indexOf('data-id="1"') < html.indexOf('data-id="3"'), 'tools in Tool ID order');
+    assert.ok(html.includes('V-bit') && html.includes('Flat 1/4'), 'each tool shows its name');
+    assert.ok(!/<button/.test(html), 'no <button>: the dialog would paint it blue');
+    assert.ok(!html.includes('no id'), 'a tool without a Tool ID is not offered');
+    h.dialogs[0].cb({ action: 'tool', toolId: 3 });
+    assert.deepEqual(h.sent, ['M61 Q3']);
+  });
+
+  test('the tool that just came out is preselected', () => {
+    const h = host({ in1: 1, tool: 3 }); arm(); fresh();
+    settle(); h.in1 = 0; settle();          // T3 taken out: M61 Q0
+    assert.deepEqual(h.sent, ['M61 Q0']);
+    h.tool = 0; h.in1 = 1; settle();
+    assert.match(h.dialogs[0].html, /class="ts-tb[^"]* active" data-id="3"/);
+    assert.match(h.dialogs[0].html, /Set Tool 3/);
+  });
+
+  test('Skip, or a tool that is there from the start: nothing sent', () => {
+    let h = host({ in1: 0, tool: 0 }); arm(); fresh();
+    settle(); h.in1 = 1; settle();
+    h.dialogs[0].cb({ action: 'skip' });
+    assert.deepEqual(h.sent, []);
+    h = host({ in1: 1, tool: 0 }); arm(); fresh();
+    settle();
+    assert.equal(h.dialogs.length, 0, 'no edge, no question');
+  });
+
+  test('tool taken out again while asking: the dialog closes and its answer is ignored', () => {
+    const h = host({ in1: 0, tool: 0 }); arm(); fresh();
+    settle(); h.in1 = 1; settle();
+    h.in1 = 0; settle();
+    assert.deepEqual(h.closed, ['dlg1']);
+    h.dialogs[0].cb({ action: 'tool', toolId: 3 });
+    assert.deepEqual(h.sent, []);
   });
 });

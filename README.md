@@ -30,9 +30,11 @@ Automatic tool changer support for pneumatic ATC systems that use a single aux o
 
 ### Positioning Commands
 - `$SLOT1` … `$SLOT8` – jog the spindle over a slot's engaged position (at Z-safe)
+- `$PROBE` – jog the spindle over the probe holder (at Z-safe); nothing is picked up
 
 ### Safety
 - Halts and prompts the operator when a load / unload sequence needs manual intervention (out-of-rack tool)
+- Tool Sensor on a Wireless I/O input: watched while idle, so a tool taken out by hand sets `M61 Q0` and a tool fitted by hand asks for its Tool ID (`M61 Q<id>`)
 - Grabs the current machine XY into any coordinate field so you don't hand-copy values
 
 ## Configuration
@@ -79,6 +81,7 @@ Three Monaco G-code editors:
 | `M6 Tn` | Full tool change to slot n (or manual position if `n > slots`) |
 | `$TLS` | Standalone tool-length probe at the configured setter position |
 | `$SLOT1` … `$SLOT8` | Move the spindle to a slot's XY at Z-safe |
+| `$PROBE` | Move the spindle over the probe holder at Z-safe (probe auto-loader on) |
 | `$H` | Home; optionally followed by a TLS routine (see toggle above) |
 
 ## Typical Setup
