@@ -1801,6 +1801,36 @@
           </div>
         </div>
 
+        <div class="pa-card" id="pa-adv-quick-release-card">
+          <h3 class="pa-card-title">Quick Release for Manual Changes</h3>
+          <p class="pa-card-help">
+            For tools you change by hand. Each Release click opens the drawbar for a moment and closes it again: to unload, hold the tool and it drops into your hand; to load, hold the new tool up in the spindle and it clamps. The drawbar uses air only for that moment, never while it waits for you. Off: Release opens the drawbar until you click Clamp.
+          </p>
+          <div class="pa-field-inline">
+            <label for="pa-adv-quick-release">
+              Quick release
+              <span class="pa-help-tip" title="On: Release opens the drawbar for the time below, then closes it on its own.">?</span>
+            </label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-adv-quick-release">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="pa-form-row" id="pa-adv-quick-release-sec-row" style="display: none">
+            <label class="pa-form-label" for="pa-adv-quick-release-sec">
+              Open For
+              <span class="pa-help-tip" title="How long the drawbar stays open on each click. Long enough to catch or push in a tool.">?</span>
+            </label>
+            <select id="pa-adv-quick-release-sec" class="pa-select">
+              <option value="0.5">0.5 seconds</option>
+              <option value="1">1 second</option>
+              <option value="1.5">1.5 seconds</option>
+              <option value="2">2 seconds</option>
+              <option value="3">3 seconds</option>
+            </select>
+          </div>
+        </div>
+
         <div class="pa-card" id="pa-adv-sensors">
           <h3 class="pa-card-title">Tool Sensors</h3>
           <p class="pa-card-help">
@@ -3078,6 +3108,9 @@
     var savedToolSense = initialConfig.toolSensorInput;
     setPinValue('pa-adv-input-toolsense', (typeof savedToolSense === 'number' && savedToolSense >= 0) ? savedToolSense : '');
     $('pa-adv-taper-blow').checked = !!initialConfig.taperBlow;
+    $('pa-adv-quick-release').checked = !!initialConfig.quickRelease;
+    $('pa-adv-quick-release-sec').value = String(initialConfig.quickReleaseSec || 1);
+    showQuickReleaseRow();
     (function() {
       var pump = String(initialConfig.waterPumpOutput || '');
       var on = /^bridge:[0-3]$/.test(pump);
@@ -3246,6 +3279,11 @@
     if (idleRow) idleRow.style.display = $('pa-adv-water-pump').checked ? '' : 'none';
   }
   $('pa-adv-water-pump').addEventListener('change', showWaterPumpRow);
+  function showQuickReleaseRow() {
+    var row = $('pa-adv-quick-release-sec-row');
+    if (row) row.style.display = $('pa-adv-quick-release').checked ? '' : 'none';
+  }
+  $('pa-adv-quick-release').addEventListener('change', showQuickReleaseRow);
 
   // The Wireless I/O keeps each output's role (drawbar, pump or none) itself.
   // Send all four on save so a change takes effect now, not at the next tool
@@ -3326,6 +3364,9 @@
       })(),
       // Taper blow / cone clean plumbed off the drawbar valve.
       taperBlow: $('pa-adv-taper-blow').checked,
+      // Quick release for manual changes: open, wait, close on each click.
+      quickRelease: $('pa-adv-quick-release').checked,
+      quickReleaseSec: parseFloat($('pa-adv-quick-release-sec').value) || 1,
       // Wireless I/O output running the spindle's water pump ('' = none). The
       // Wireless I/O itself switches it from the spindle speed (role <n> pump).
       waterPumpOutput: $('pa-adv-water-pump').checked ? $('pa-adv-water-pump-output').value : '',

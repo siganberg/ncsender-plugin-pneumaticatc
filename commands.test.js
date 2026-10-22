@@ -1430,7 +1430,7 @@ describe('buildLoadTool — T0 → manual tool auto-releases drawbar (no Release
   };
   const MANUAL_TOOL_NUM = 4;  // > slots → treated as manual tool
 
-  test('T0 → T4 (manual): auto-fires M64 unclamp BEFORE the MANUAL_CLAMP_TOOL dialog', () => {
+  test('T0 → T4 (manual): the drawbar opens only on the Release click (MANUAL_LOAD_TOOL)', () => {
     const slotPos = calculateSlotPosition(MANUAL_RACK, MANUAL_TOOL_NUM);
     const gcode = buildLoadTool(
       MANUAL_RACK, MANUAL_TOOL_NUM, slotPos,
@@ -1441,18 +1441,17 @@ describe('buildLoadTool — T0 → manual tool auto-releases drawbar (no Release
     );
     // Use raw gcode for ordering — motionLines strips (MSG,...) comments,
     // which is where the dialog anchor lives.
+    const dialogPos  = gcode.indexOf('MANUAL_LOAD_TOOL');
     const unclampPos = gcode.indexOf('M64 P2');
-    const dialogPos  = gcode.indexOf('MANUAL_CLAMP_TOOL');
     const clampPos   = gcode.lastIndexOf('M65 P2');
-    assert.notEqual(unclampPos, -1, 'must auto-fire M64 (unclamp)');
-    assert.notEqual(dialogPos, -1, 'must show MANUAL_CLAMP_TOOL dialog');
-    assert.ok(unclampPos < dialogPos,
-      'auto-unclamp must fire BEFORE the dialog so the collet is open when the operator inserts the tool');
-    assert.ok(clampPos > dialogPos,
-      'final clamp (M65) must fire AFTER the dialog / user Clamp click');
-    // Explicitly reject the old two-click dialog.
-    assert.ok(!gcode.includes('MANUAL_LOAD_TOOL'),
-      'MANUAL_LOAD_TOOL (Release + Clamp) dialog must NOT appear — replaced by auto-release + MANUAL_CLAMP_TOOL');
+    assert.notEqual(dialogPos, -1, 'must show the Release + Clamp dialog');
+    assert.ok(unclampPos > dialogPos,
+      'no release before the dialog: an open drawbar waiting for the operator vents the taper blow');
+    // Release (M0 → unclamp) then Clamp (M0 → clamp) then Continue (M0).
+    const afterDialog = gcode.slice(dialogPos).split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('('));
+    assert.deepEqual(afterDialog.slice(1, 6), ['M0', 'M64 P2', 'M0', 'M65 P2', 'M0']);
+    assert.ok(clampPos > unclampPos);
+    assert.ok(!gcode.includes('MANUAL_CLAMP_TOOL'));
   });
 
   test('Tm (rack) → T4 (manual) with drawbarAlreadyReleased=true: NO extra auto-release', () => {
@@ -1745,6 +1744,38 @@ describe('taperBlow — Sienci-style drawbar handling around the traverse', () =
     assert.notEqual(auxOf(lines[lift + 1]), auxOf(lines.find((l) => /^M6[45] P1$/.test(l))), 'the aux after lift-off must be the clamp, i.e. the opposite of the release');
     const safe = lines.findIndex((l) => l === 'G53 G0 Z-5');
     assert.ok(safe > lift + 1, 'the clamp happens before the rapid to Z-safe');
+  });
+
+  test('on: a manual unload closes the drawbar once the tool is out, and the rack load opens it above the holder', () => {
+    // T5 is past the 3 slots: a hand tool. Release, Continue, then clamp.
+    const prog = buildToolChangeProgram(on, 5, 2, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }).join('\n')
+      .split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('('));
+    const auxes = prog.filter((l) => /^M6[45] P1$/.test(l));
+    // release (manual), clamp (after Continue), release above slot 2, clamp onto it
+    assert.equal(auxes.length, 4, prog.join('\n'));
+    assert.equal(auxes[0], auxes[2]);
+    assert.equal(auxes[1], auxes[3]);
+    assert.notEqual(auxes[0], auxes[1]);
+    const reclamp = prog.indexOf(auxes[1]);
+    assert.equal(prog[reclamp - 1], 'M0', 'the re-clamp follows the Continue click');
+    const travel = prog.findIndex((l, i) => i > reclamp && /^G53 G0 X/.test(l));
+    assert.ok(travel > reclamp, 'clamped before travelling to the rack');
+  });
+
+  test('on: a manual load never opens the drawbar before the operator presses Release', () => {
+    const prog = buildToolChangeProgram(on, 1, 5, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }).join('\n');
+    assert.match(prog, /MANUAL_LOAD_TOOL_5\b/);
+    const lines = prog.split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('('));
+    const dialog = prog.split('\n').map((l) => l.trim()).filter((l) => l !== '').findIndex((l) => l.includes('MANUAL_LOAD_TOOL_5'));
+    const all = prog.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+    // From the dialog on: M0 (Release) → release, M0 (Clamp) → clamp, M0 (Continue).
+    const after = all.slice(dialog + 1).filter((l) => !l.startsWith('('));
+    assert.equal(after[0], 'M0');
+    assert.match(after[1], /^M6[45] P1$/);
+    assert.equal(after[2], 'M0');
+    assert.match(after[3], /^M6[45] P1$/);
+    assert.equal(after[4], 'M0');
+    assert.ok(lines.length > 0);
   });
 
   test('off: the unload leaves the drawbar open and goes straight to Z-safe', () => {
@@ -2064,7 +2095,7 @@ describe('probe auto-loader — tool change programs', () => {
     const cfg = base();
     cfg.probe.enabled = false;
     const prog = buildToolChangeProgram(cfg, 0, 99, { x: 0, y: 0, z: 0 }, 0, origin);
-    assert.ok(prog.join('\n').includes('MANUAL_CLAMP_TOOL_99'));
+    assert.ok(prog.join('\n').includes('MANUAL_LOAD_TOOL_99'));
   });
 });
 
@@ -2777,7 +2808,7 @@ describe('Tool Numbering: what M6 T<n> loads', () => {
 
   test('Slot numbering: the Manual button\'s T<size + 1> is a hand load', () => {
     const out = run('M6 T4', slotList);
-    assert.match(out, /MANUAL_CLAMP_TOOL_4\b/);
+    assert.match(out, /MANUAL_(LOAD|CLAMP)_TOOL_4\b/);
   });
 
   test('Tool ID numbering: a tool in a slot loads from the rack by its ID', () => {
@@ -2788,7 +2819,7 @@ describe('Tool Numbering: what M6 T<n> loads', () => {
 
   test('Tool ID numbering: a tool in no slot is a hand load', () => {
     const out = run('M6 T50', [{ toolId: 300, toolNumber: 2 }, { toolId: 50, toolNumber: null }]);
-    assert.match(out, /MANUAL_CLAMP_TOOL_50\b/);
+    assert.match(out, /MANUAL_(LOAD|CLAMP)_TOOL_50\b/);
   });
 });
 
@@ -3233,5 +3264,51 @@ describe('Tool sensor watch (Wireless I/O)', () => {
     assert.deepEqual(h.closed, ['dlg1']);
     h.dialogs[0].cb({ action: 'tool', toolId: 3 });
     assert.deepEqual(h.sent, []);
+  });
+});
+
+// Quick release for manual changes: each click opens the drawbar for
+// quickReleaseSec and closes it again, so nothing waits open on the air.
+describe('quickRelease — manual changes open and close on one click', () => {
+  const base = { slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5, clampAuxOutput: 1 };
+  const cfg = buildInitialConfig({ ...base, quickRelease: true, quickReleaseSec: 1.5 });
+  const lines = (prog) => prog.join('\n').split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  const afterMsg = (all, key) => all.slice(all.findIndex((l) => l.includes(key)) + 1).filter((l) => !l.startsWith('('));
+
+  test('settings: off by default, 1 s, only the listed times', () => {
+    const d = buildInitialConfig(base);
+    assert.equal(d.quickRelease, false);
+    assert.equal(d.quickReleaseSec, 1);
+    assert.equal(buildInitialConfig({ ...base, quickReleaseSec: 7 }).quickReleaseSec, 1);
+  });
+
+  test('T0 → manual: one click opens, waits, closes; never open before it', () => {
+    const all = lines(buildToolChangeProgram(cfg, 0, 5, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }));
+    const dialog = all.findIndex((l) => l.includes('MANUAL_QUICK_LOAD_TOOL_5'));
+    assert.ok(dialog > 0);
+    assert.ok(!all.slice(0, dialog).some((l) => /^M6[45] P1$/.test(l)), 'nothing switched before the dialog');
+    const after = afterMsg(all, 'MANUAL_QUICK_LOAD_TOOL_5');
+    assert.equal(after[0], 'M0');
+    assert.match(after[1], /^M6[45] P1$/);
+    assert.equal(after[2], 'G4 P1.5');
+    assert.match(after[3], /^M6[45] P1$/);
+    assert.notEqual(after[1], after[3]);
+    assert.equal(after[4], 'M0');
+    assert.equal(after[5], 'M61 Q5');
+  });
+
+  test('manual → rack: the unload pulses, so the rack load opens the drawbar itself', () => {
+    const all = lines(buildToolChangeProgram(cfg, 5, 2, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }));
+    const after = afterMsg(all, 'MANUAL_QUICK_UNLOAD_TOOL_5');
+    assert.deepEqual([after[0], after[2], after[4], after[5]], ['M0', 'G4 P1.5', 'M0', 'M61 Q0']);
+    // release + close on the click, then release + clamp at slot 2
+    assert.equal(all.filter((l) => /^M6[45] P1$/.test(l)).length, 4);
+  });
+
+  test('manual → manual: Release catches the old bit, Release & Clamp takes the new one', () => {
+    const all = lines(buildToolChangeProgram(cfg, 5, 6, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 }));
+    const after = afterMsg(all, 'MANUAL_QUICK_SWAP_TOOL_6');
+    assert.deepEqual(after.filter((l) => l === 'M0').length, 3);
+    assert.equal(after.filter((l) => l === 'G4 P1.5').length, 2);
   });
 });

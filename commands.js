@@ -295,6 +295,11 @@ const buildInitialConfig = (raw = {}) => {
     // Taper blow / cone clean plumbed off the drawbar valve (Sienci kit).
     // See DEDUST_* above for what it changes in the sequence.
     taperBlow: !!raw.taperBlow,
+    // Quick release for manual changes: each Release / Clamp click opens the
+    // drawbar for quickReleaseSec and closes it again, so a hand change uses
+    // air for a second instead of the whole time the collet waits open.
+    quickRelease: !!raw.quickRelease,
+    quickReleaseSec: [0.5, 1, 1.5, 2, 3].includes(Number(raw.quickReleaseSec)) ? Number(raw.quickReleaseSec) : 1,
     // Wireless I/O output running the spindle's water pump ('' = none). The
     // bridge switches it from the spindle speed on its own (role <n> pump);
     // never the clamp output, which keeps the drawbar role.
@@ -1337,6 +1342,14 @@ function rackExitToOrigin(fromSlotXY, isEmpty, origin, settings) {
 
 // === Clamp / unclamp sub-routines ===
 
+// Quick release: open, hold open for quickReleaseSec, close. The G4 dwell
+// is acknowledged only once it has run, so the close goes out after it.
+function quickPulse(settings) {
+  return `${auxLineFor(settings, 'unclamp')}
+      G4 P${settings.quickReleaseSec}
+      ${auxLineFor(settings, 'clamp')}`;
+}
+
 function auxLineFor(settings, action) {
   const { on, off } = auxOnOff(settings.clampAuxOutput);
   // Fail-safe polarity: aux OFF (no power) holds the clamp; aux ON
@@ -1580,13 +1593,32 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
     // [Continue] → each button click sends `~`, advancing one step.
     // Release advances to open the drawbar (aux OFF); Continue advances
     // past the second M0 to run M61 Q0.
+    // Close Drawbar Between Slots (taper blow): once the tool is out, close
+    // the drawbar again, so the blow isn't venting all the way to the next
+    // slot (the load opens it above the holder, as after a rack unload).
+    if (settings.quickRelease) {
+      // One click: the drawbar opens for a moment and closes, the tool drops
+      // into the operator's hand. Nothing stays open afterwards.
+      return `
+      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      G4 P0
+      (MSG, PLUGIN_PNEUMATICATC:MANUAL_QUICK_UNLOAD_TOOL_${idOf(currentTool)})
+      M0
+      ${quickPulse(settings)}
+      M0
+      M61 Q0
+    `.trim();
+    }
+    const reclamp = settings.taperBlow ? `
+      ${auxLineFor(settings, 'clamp')}
+      G4 P0.5` : '';
     return `
       G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
       G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_UNLOAD_TOOL_${idOf(currentTool)})
       M0
       ${auxLineFor(settings, 'unclamp')}
-      M0
+      M0${reclamp}
       M61 Q0
     `.trim();
   }
@@ -1638,25 +1670,50 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
   if (toolNumber === 0) return '';
 
   if (toolNumber > settings.slots) {
-    // Manual load — dialog always shows the single-Clamp step
-    // (MANUAL_CLAMP_TOOL), regardless of prior state. Two paths to get
-    // there, differing only in whether we need to fire an auto-release
-    // before showing the dialog:
-    //   - drawbarAlreadyReleased=true — just unloaded a rack/manual tool,
-    //     drawbar is already open. Straight to the dialog.
-    //   - drawbarAlreadyReleased=false — coming from T0 (empty spindle,
-    //     drawbar is in its fail-safe clamped rest state). No tool is
-    //     in the spindle to drop, so auto-release the drawbar for the
-    //     operator (with a short dwell for the pneumatics to actuate)
-    //     and jump straight to the same insert-and-Clamp dialog.
-    // Both paths converge on MANUAL_CLAMP_TOOL — operator just inserts
-    // the bit, hits Clamp, hits Continue.
-    var autoRelease = drawbarAlreadyReleased ? '' : `
+    // Manual load. The drawbar opens only when the operator is there to
+    // press a button, never on its own: released and waiting for someone,
+    // a drawbar with the taper blow on vents the compressor until Clamp.
+    //   - drawbarAlreadyReleased=true — just unloaded a rack tool with the
+    //     drawbar left open (no taper blow). Insert-and-Clamp dialog
+    //     (MANUAL_CLAMP_TOOL).
+    //   - drawbarAlreadyReleased=false — the drawbar is clamped (from T0, or
+    //     re-clamped after an unload). Release-then-Clamp dialog
+    //     (MANUAL_LOAD_TOOL): Release opens it, the operator inserts the
+    //     bit, Clamp closes it, Continue.
+    if (settings.quickRelease) {
+      // One click: the operator holds the bit up in the collet, the drawbar
+      // opens for a moment and closes on it. An open drawbar is closed first.
+      const closeFirst = drawbarAlreadyReleased ? `
+      ${auxLineFor(settings, 'clamp')}
+      G4 P0.5` : '';
+      return `${closeFirst}
+      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      G4 P0
+      (MSG, PLUGIN_PNEUMATICATC:MANUAL_QUICK_LOAD_TOOL_${idOf(toolNumber)})
+      M0
+      ${quickPulse(settings)}
+      M0
+      M61 Q${idOf(toolNumber)}
+      ${tlsRoutine}
+    `.trim();
+    }
+    if (!drawbarAlreadyReleased) {
+      return `
+      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      G4 P0
+      (MSG, PLUGIN_PNEUMATICATC:MANUAL_LOAD_TOOL_${idOf(toolNumber)})
+      M0
       ${auxLineFor(settings, 'unclamp')}
-      G4 P0.5`;
+      M0
+      ${auxLineFor(settings, 'clamp')}
+      M0
+      M61 Q${idOf(toolNumber)}
+      ${tlsRoutine}
+    `.trim();
+    }
     return `
       G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
-      G4 P0${autoRelease}
+      G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_CLAMP_TOOL_${idOf(toolNumber)})
       M0
       ${auxLineFor(settings, 'clamp')}
@@ -1948,6 +2005,22 @@ function buildManualSwap(settings, toolNumber, tlsRoutine) {
   // Manual → Manual: one physical park, one dialog. Buttons Release
   // (aux OFF, opens drawbar) → user swaps bits → Clamp (aux ON, closes
   // drawbar) → Continue advances past the final M0 to M61 + TLS.
+  // Quick release: Release opens and closes (catch the old bit), Release &
+  // Clamp opens and closes on the new one.
+  if (settings.quickRelease) {
+    return `
+    G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+    G4 P0
+    (MSG, PLUGIN_PNEUMATICATC:MANUAL_QUICK_SWAP_TOOL_${idOf(toolNumber)})
+    M0
+    ${quickPulse(settings)}
+    M0
+    ${quickPulse(settings)}
+    M0
+    M61 Q${idOf(toolNumber)}
+    ${tlsRoutine}
+  `.trim();
+  }
   return `
     G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
     G4 P0
@@ -2087,7 +2160,9 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // lifting off, so the drawbar is NOT left open for the load that follows.
   const rackUnloadReclamped = settings.taperBlow && currentTool > 0 && currentTool <= settings.slots;
   const probeUnloadReclamped = settings.taperBlow && sourceIsProbe;
-  const drawbarAlreadyReleased = currentTool > 0 && !rackUnloadReclamped && !probeUnloadReclamped;
+  // So does a manual unload (see buildUnloadTool).
+  const manualUnloadReclamped = (settings.taperBlow || settings.quickRelease) && isManualTool(currentTool) && !isManualToManual;
+  const drawbarAlreadyReleased = currentTool > 0 && !rackUnloadReclamped && !probeUnloadReclamped && !manualUnloadReclamped;
   // Where the swap starts from. Normally the pre-M6 position; after the
   // extra touch-off that keeps a Z0 (see zeroKeepPlan) the spindle is at the
   // toolsetter, so route the unload straight from there instead of driving
@@ -2138,7 +2213,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // Tx → T0 leaves the drawbar released after the unload (there is no
   // load section to re-clamp). Restore the fail-safe clamped state so
   // the spindle isn't sitting with the collet open at rest.
-  const finalizeUnclamped = (toolNumber === 0 && unloadSection && !rackUnloadReclamped && !probeUnloadReclamped)
+  const finalizeUnclamped = (toolNumber === 0 && unloadSection && !rackUnloadReclamped && !probeUnloadReclamped && !manualUnloadReclamped)
     ? `G4 P0.5\n    ${auxLineFor(settings, 'clamp')}\n    G4 P0.5`
     : '';
 
