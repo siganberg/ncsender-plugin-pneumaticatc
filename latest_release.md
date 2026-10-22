@@ -1,5 +1,4 @@
 ## What's Changed
 
 ### ✨ New Features
-- Added Tool Sensor watch, which lets the plugin monitor the tool sensor
-- Added the $PROBE command
+- Added Quick Release for manual tool changes, so the drawbar no longer stays open while it waits
