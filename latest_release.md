@@ -1,4 +1,4 @@
 ## What's Changed
 
-### ✨ New Features
-- Added Quick Release for manual tool changes, so the drawbar no longer stays open while it waits
+### 🐛 Bug Fixes
+- Tool moves to and from the manual tool change station now travel around the tool rack instead of crossing it.
