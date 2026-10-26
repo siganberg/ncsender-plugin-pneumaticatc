@@ -3312,3 +3312,63 @@ describe('quickRelease — manual changes open and close on one click', () => {
     assert.equal(after.filter((l) => l === 'G4 P1.5').length, 2);
   });
 });
+
+describe('manual station: moves to and from it route around the rack', () => {
+  // Rack in a column at X -115 (keepout X -175..-55, Y -20..260), the job on
+  // one side and the manual station on the other: a straight line between
+  // them runs over the rack with the operator's bit hanging below the spindle.
+  const base = {
+    slots: 3, orientation: 'Y', direction: 'Positive', slot1: { x: -115, y: 40, z: -100 },
+    slotDistance: 80, slideDirection: 'Negative', slideDistance: 40, keepoutPadding: 60,
+    zSafe: -5, clampAuxOutput: 1, manualTool: { x: -300, y: 100 }, toolsetter: { x: 50, y: 0, z: -90 },
+  };
+  const fork = buildInitialConfig(base);
+  const cup = buildInitialConfig({ ...base, rackHolding: 'Cup' });
+  const origin = { x: 0, y: 100 };
+
+  // Every XY move outside the rack itself (slot entries/exits start or end
+  // inside the keepout) must stay out of the keepout.
+  const movesCrossingRack = (settings, from, to) => {
+    const zone = computeKeepoutZone(settings);
+    const inside = (p) => p.x > zone.minX && p.x < zone.maxX && p.y > zone.minY && p.y < zone.maxY;
+    const lines = buildToolChangeProgram(settings, from, to, { x: 0, y: 0, z: 0 }, 0, origin)
+      .join('\n').split('\n').map((l) => l.trim());
+    let at = { ...origin };
+    const bad = [];
+    for (const line of lines) {
+      const m = line.match(/^G53 G[01](?: X(-?[\d.]+))?(?: Y(-?[\d.]+))?/);
+      if (!m || (m[1] === undefined && m[2] === undefined)) continue;
+      const next = { x: m[1] !== undefined ? +m[1] : at.x, y: m[2] !== undefined ? +m[2] : at.y };
+      if (!inside(at) && !inside(next)) {
+        for (let i = 1; i < 100; i++) {
+          const t = i / 100;
+          if (inside({ x: at.x + (next.x - at.x) * t, y: at.y + (next.y - at.y) * t })) { bad.push(`${line} from (${at.x}, ${at.y})`); break; }
+        }
+      }
+      at = next;
+    }
+    return { bad, lines };
+  };
+
+  for (const [name, settings] of [['fork', fork], ['cup', cup]]) {
+    for (const [from, to, label] of [
+      [0, 4, 'T0 → manual'],
+      [1, 4, 'rack → manual'],
+      [4, 1, 'manual → rack'],
+      [4, 0, 'manual → T0'],
+      [4, 5, 'manual → manual'],
+    ]) {
+      test(`${name}: ${label} never crosses the rack`, () => {
+        const { bad, lines } = movesCrossingRack(settings, from, to);
+        assert.deepEqual(bad, [], lines.join('\n'));
+        assert.ok(lines.includes('G53 G0 X-300 Y100'), 'still goes to the manual station');
+      });
+    }
+  }
+
+  test('a clear path to the manual station stays one direct move', () => {
+    const near = buildInitialConfig({ ...base, manualTool: { x: 100, y: 100 } });
+    const lines = buildUnloadTool(near, 4, calculateSlotPosition(near, 4), origin).split('\n').map((l) => l.trim());
+    assert.equal(lines[0], 'G53 G0 X100 Y100');
+  });
+});

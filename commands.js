@@ -1581,6 +1581,13 @@ function toolGuard(settings, oNum, expect, retreat) {
   );
 }
 
+// The manual station sits outside the rack, but the straight line to it can
+// cross the rack, with the operator's bit hanging below the spindle on the
+// way in and out. Route it around the keepout like the probe holder.
+function manualRoute(from, settings) {
+  return probeRoute(from, settings.manualTool, settings);
+}
+
 function slideFeedrate(settings) {
   return settings.slideSpeed > 0 ? settings.slideSpeed : 500;
 }
@@ -1600,7 +1607,7 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
       // One click: the drawbar opens for a moment and closes, the tool drops
       // into the operator's hand. Nothing stays open afterwards.
       return `
-      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      ${manualRoute(origin, settings)}
       G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_QUICK_UNLOAD_TOOL_${idOf(currentTool)})
       M0
@@ -1613,7 +1620,7 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
       ${auxLineFor(settings, 'clamp')}
       G4 P0.5` : '';
     return `
-      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      ${manualRoute(origin, settings)}
       G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_UNLOAD_TOOL_${idOf(currentTool)})
       M0
@@ -1666,10 +1673,13 @@ function buildUnloadTool(settings, currentTool, slotPos, origin = { x: 0, y: 0 }
   `.trim();
 }
 
-function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlreadyReleased = false, origin = { x: 0, y: 0 }, chainedFromRack = false, abortTo = undefined) {
+function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlreadyReleased = false, origin = { x: 0, y: 0 }, chainedFromRack = false, abortTo = undefined, manualEntrance = undefined) {
   if (toolNumber === 0) return '';
 
   if (toolNumber > settings.slots) {
+    // The way to the manual station: around the rack from `origin`, or out
+    // of the rack after a chained rack unload (the caller's manualEntrance).
+    const toManual = manualEntrance ?? manualRoute(origin, settings);
     // Manual load. The drawbar opens only when the operator is there to
     // press a button, never on its own: released and waiting for someone,
     // a drawbar with the taper blow on vents the compressor until Clamp.
@@ -1687,7 +1697,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       ${auxLineFor(settings, 'clamp')}
       G4 P0.5` : '';
       return `${closeFirst}
-      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      ${toManual}
       G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_QUICK_LOAD_TOOL_${idOf(toolNumber)})
       M0
@@ -1699,7 +1709,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
     }
     if (!drawbarAlreadyReleased) {
       return `
-      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      ${toManual}
       G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_LOAD_TOOL_${idOf(toolNumber)})
       M0
@@ -1712,7 +1722,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
     `.trim();
     }
     return `
-      G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+      ${toManual}
       G4 P0
       (MSG, PLUGIN_PNEUMATICATC:MANUAL_CLAMP_TOOL_${idOf(toolNumber)})
       M0
@@ -2001,7 +2011,7 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
   `.trim();
 }
 
-function buildManualSwap(settings, toolNumber, tlsRoutine) {
+function buildManualSwap(settings, toolNumber, tlsRoutine, from = { x: 0, y: 0 }) {
   // Manual → Manual: one physical park, one dialog. Buttons Release
   // (aux OFF, opens drawbar) → user swaps bits → Clamp (aux ON, closes
   // drawbar) → Continue advances past the final M0 to M61 + TLS.
@@ -2009,7 +2019,7 @@ function buildManualSwap(settings, toolNumber, tlsRoutine) {
   // Clamp opens and closes on the new one.
   if (settings.quickRelease) {
     return `
-    G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+    ${manualRoute(from, settings)}
     G4 P0
     (MSG, PLUGIN_PNEUMATICATC:MANUAL_QUICK_SWAP_TOOL_${idOf(toolNumber)})
     M0
@@ -2022,7 +2032,7 @@ function buildManualSwap(settings, toolNumber, tlsRoutine) {
   `.trim();
   }
   return `
-    G53 G0 X${settings.manualTool.x} Y${settings.manualTool.y}
+    ${manualRoute(from, settings)}
     G4 P0
     (MSG, PLUGIN_PNEUMATICATC:MANUAL_SWAP_TOOL_${idOf(toolNumber)})
     M0
@@ -2104,7 +2114,8 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   const chainedFromRackExit = shouldProbe && isRackSlot;
   // After a probe pickup the spindle is at the holder, so the toolsetter
   // approach routes from there rather than from the pre-M6 origin.
-  const tlsRouteFrom = targetIsProbe ? holderRestXY : origin;
+  // A manual tool is fitted at the manual station, so it leaves from there.
+  const tlsRouteFrom = targetIsProbe ? holderRestXY : (targetIsManual ? settings.manualTool : origin);
   // Z0 set before a reference by the tool now in the spindle (zeroKeepPlan):
   // measure that tool first, then let the new tool's measurement keep the Z0.
   // Without a new tool to measure, fix the reference with the current tool.
@@ -2191,10 +2202,11 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // Where the spindle is when the load begins: still at the pre-M6 origin
   // for T0, at the holder after a probe put-down, at the slot after a rack
   // unload (buildLoadTool handles that chain itself).
-  const loadFrom = sourceIsProbe ? holderUnloadRestXY : swapFrom;
+  // After a manual unload it is at the manual station.
+  const loadFrom = sourceIsProbe ? holderUnloadRestXY : (isManualTool(currentTool) ? settings.manualTool : swapFrom);
   let loadSection;
   if (isManualToManual) {
-    loadSection = buildManualSwap(settings, toolNumber, tlsRoutine);
+    loadSection = buildManualSwap(settings, toolNumber, tlsRoutine, swapFrom);
   } else if (targetIsProbe) {
     // Entrance to the holder approach: leave the rack properly when
     // chained after a rack unload, otherwise route from wherever we are
@@ -2207,7 +2219,13 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
       : probeRoute(fromXY, holder.approach, settings);
     loadSection = buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased);
   } else {
-    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo);
+    // Rack unload → manual load: leave the rack the way a rack exit does.
+    const manualEntrance = targetIsManual && chainedFromRack
+      ? (settings.rackHolding === 'Cup'
+          ? cupExit(sourceSlot.engaged, settings.manualTool, settings)
+          : rackExit(sourceSlot.engaged, settings.manualTool, settings))
+      : undefined;
+    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo, manualEntrance);
   }
 
   // Tx → T0 leaves the drawbar released after the unload (there is no
