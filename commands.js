@@ -330,12 +330,12 @@ const buildInitialConfig = (raw = {}) => {
 //                             TLS probe motion (e.g. for oddball fixtures).
 //                             Separate from TLO.
 
-// Tool-id concept: a T number is the Tool ID (the tool, not the pocket), so
-// the library is searched by Tool ID first; a slot is only a fallback.
-// Offsets belong to the tool, never the slot.
+// A T number is the Tool ID, as the app's tool list numbers it (the slot
+// with Slot numbering). Never the slot as a fallback: with Tool ID numbering
+// that is another tool, and its offsets would be used. Offsets belong to the
+// tool, never the slot.
 function findTool(toolNumber, tools) {
-  return tools.find((t) => t.toolId === toolNumber)
-    || tools.find((t) => t.toolNumber === toolNumber);
+  return tools.find((t) => t.toolId === toolNumber);
 }
 
 // The sequence builders think in physical positions: 1..slots is a rack slot,

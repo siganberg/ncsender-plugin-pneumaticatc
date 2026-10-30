@@ -1886,8 +1886,8 @@ describe('$MEASURE_TLO — measure-all batch step', () => {
     clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, tlsMode: 'library',
   });
   const tools = [
-    { toolNumber: 1, offsets: { x: 0, y: 0, z: -55.014, tlsZ: 0 } },  // has a stored TLO
-    { toolNumber: 2, offsets: { x: 0, y: 0, z: 0, tlsZ: 0 } },
+    { toolNumber: 1, toolId: 1, offsets: { x: 0, y: 0, z: -55.014, tlsZ: 0 } },  // has a stored TLO
+    { toolNumber: 2, toolId: 2, offsets: { x: 0, y: 0, z: 0, tlsZ: 0 } },
   ];
   const run = (command, tool, mpos = { x: 10, y: 20 }) => {
     const commands = [{ command, isOriginal: true }];
@@ -2461,8 +2461,8 @@ describe('keeps a Z0 set before any tool length reference', () => {
     clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, tlsMode: 'library',
   });
   const tools = [
-    { toolNumber: 1, offsets: { x: 0, y: 0, z: -55.014, tlsZ: 0 } },
-    { toolNumber: 2, offsets: { x: 0, y: 0, z: -48.2, tlsZ: 0 } },
+    { toolNumber: 1, toolId: 1, offsets: { x: 0, y: 0, z: -55.014, tlsZ: 0 } },
+    { toolNumber: 2, toolId: 2, offsets: { x: 0, y: 0, z: -48.2, tlsZ: 0 } },
   ];
   const pending = { toolLengthSet: false, zeroSetWithoutTlr: true, zeroTool: 1 };
   const run = (command, ms) => {
@@ -2564,10 +2564,10 @@ describe('Z0 carry-over trusts the library when the reference touch matches it',
     clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, tlsMode: 'library',
   };
   const tools = [
-    { toolNumber: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
-    { toolNumber: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
-    { toolNumber: 3, offsets: { x: 0, y: 0, z: 0, tlsZ: 0 } },
-    { toolNumber: 9, offsets: { x: 0, y: 0, z: -40.1, tlsZ: 0 } },
+    { toolNumber: 1, toolId: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
+    { toolNumber: 2, toolId: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
+    { toolNumber: 3, toolId: 3, offsets: { x: 0, y: 0, z: 0, tlsZ: 0 } },
+    { toolNumber: 9, toolId: 9, offsets: { x: 0, y: 0, z: -40.1, tlsZ: 0 } },
   ];
   const run = (command, { tool = 1, settings = {}, toolList = tools, ms = {} } = {}) => {
     const commands = [{ command, isOriginal: true }];
@@ -2653,8 +2653,8 @@ describe('Post Tool Change runs before the return to origin', () => {
     postToolChangeGcode: '(POST TC)\nG53 G0 X500 Y500',
   };
   const tools = [
-    { toolNumber: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
-    { toolNumber: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
+    { toolNumber: 1, toolId: 1, offsets: { x: 0, y: 0, z: -46.63, tlsZ: 0 } },
+    { toolNumber: 2, toolId: 2, offsets: { x: 0, y: 0, z: -33.78, tlsZ: 0 } },
   ];
   const run = (command, { settings = {}, ms = {} } = {}) => {
     const commands = [{ command, isOriginal: true }];
@@ -2713,8 +2713,8 @@ describe('manual tools always measure', () => {
     clampAuxOutput: 1, toolsetter: { x: 300, y: -200 }, manualTool: { x: 200, y: -100 }, tlsMode: 'library',
   });
   const tools = [
-    { toolNumber: 2, offsets: { z: -52.1 } },   // rack tool, TLO on file
-    { toolNumber: 5, offsets: { z: -47.5 } },   // manual tool, TLO on file
+    { toolNumber: 2, toolId: 2, offsets: { z: -52.1 } },   // rack tool, TLO on file
+    { toolNumber: 5, toolId: 5, offsets: { z: -47.5 } },   // manual tool, TLO on file
   ];
   const run = (command, tool = 1) => {
     const commands = [{ command, isOriginal: true }];
