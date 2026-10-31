@@ -3622,14 +3622,30 @@
     // an older core without /api/app-info responds 404 and we treat
     // that as "not pro" (safe fallback). Wrapped in try/catch so a
     // network hiccup can't derail the save.
+    //
+    // Newer cores keep a list of named zones: the rack is our own "ATC Zone"
+    // in it, so the user's other zones are left alone and the switch the
+    // user set on it is kept (no `enabled` sent). Older cores have one zone
+    // only (404 on the endpoint): that gets the rack, as before.
     var keepout = await computeKeepoutFromSettings(payload);
     if (keepout && await isProCore()) {
       try {
-        await fetch(BASE_URL + '/api/settings', {
-          method: 'PATCH',
+        var res = await fetch(BASE_URL + '/api/keepout/managed/com.ncsender.pneumaticatc', {
+          method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ advanced: { keepoutZone: keepout } })
+          body: JSON.stringify({
+            name: 'ATC Zone',
+            minX: keepout.min.x, minY: keepout.min.y,
+            maxX: keepout.max.x, maxY: keepout.max.y
+          })
         });
+        if (res.status === 404) {
+          await fetch(BASE_URL + '/api/settings', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ advanced: { keepoutZone: keepout } })
+          });
+        }
       } catch (err) {
         console.warn('[PneumaticATC] keepout zone sync failed:', err);
       }
