@@ -1,4 +1,4 @@
 ## What's Changed
 
-### 🐛 Bug Fixes
-- Tools are now always found by their Tool ID. The plugin no longer uses a tool's slot position to find it, so it won't pick the wrong tool.
+### ✨ New Features
+- On ncSender Pro, the tool rack now stays as its own ATC zone
