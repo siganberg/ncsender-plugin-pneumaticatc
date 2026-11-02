@@ -37,6 +37,15 @@ const MAX_TOOL_NUMBER = 99;
 const DRAWBAR_OFFSET_MM = 1;
 const DRAWBAR_FEEDRATE_MMPM = 300;
 
+// How far above the holder a pickup clamps before feeding down onto it.
+// The Sienci spindle clamps at Load Z, the way its own TC.macro does: 1 mm
+// higher the collet misses the pull stud, the tool sensor reads empty, and
+// the holder comes up half-held (reported on a Sienci kit at the Sienci
+// setup's Load Z).
+function clampOffsetMm(settings) {
+  return settings.atcProfile === 'sienci' ? 0 : DRAWBAR_OFFSET_MM;
+}
+
 // Taper blow / cone clean. On the Sienci kit the taper-blow port is teed off
 // the drawbar valve, so air blasts out through the collet the whole time the
 // drawbar is open. Sienci's TC.macro works with that in three ways, and with
@@ -1765,8 +1774,8 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
   // descend to slot.z at DRAWBAR_FEEDRATE_MMPM overlapping with the
   // pneumatic pull-up so the holder stays on the cup / fork lip while
   // the drawbar pulls the tang up. Applies to both hold styles.
-  const approachZ   = settings.slot1.z + DRAWBAR_OFFSET_MM;
-  const drawbarSeat = `
+  const approachZ   = settings.slot1.z + clampOffsetMm(settings);
+  const drawbarSeat = approachZ === settings.slot1.z ? '' : `
       G53 G1 Z${settings.slot1.z} F${DRAWBAR_FEEDRATE_MMPM}`;
 
   // Descent onto the holder. Taper blow: the drawbar was closed after the
@@ -1950,8 +1959,8 @@ function buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased) 
       ${auxLineFor(settings, 'unclamp')}
       G4 P0.5
       ${drawbarGuard(settings, 230, 'open')}`;
-  const approachZ   = h.z + DRAWBAR_OFFSET_MM;
-  const drawbarSeat = `
+  const approachZ   = h.z + clampOffsetMm(settings);
+  const drawbarSeat = approachZ === h.z ? '' : `
       G53 G1 Z${h.z} F${DRAWBAR_FEEDRATE_MMPM}`;
   const descend = settings.taperBlow ? `
       G53 G0 Z${h.z + DEDUST_LIFT_MM}

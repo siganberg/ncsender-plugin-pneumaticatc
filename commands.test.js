@@ -2703,6 +2703,37 @@ describe('Sienci profile turns the Sienci keepout off around rack moves', () => 
   });
 });
 
+describe('Sienci profile clamps a pickup at Load Z', () => {
+  // Sienci's TC.macro clamps at Load Z. Clamping 1 mm higher missed the pull
+  // stud on a Sienci kit: the tool sensor read empty and the holder came up
+  // half-held.
+  const base = { slots: 3, slot1: { x: -115, y: 40, z: -100 }, slotDistance: 80, zSafe: -5, clampAuxOutput: 1, rackHolding: 'Fork' };
+  const pickup = (extra) => {
+    const settings = buildInitialConfig({ ...base, ...extra });
+    const slotPos = calculateSlotPosition(settings, 2);
+    const lines = motionLines(buildLoadTool(settings, 2, slotPos, '', false, { x: 60, y: 120 }, false));
+    return lines.slice(lines.findIndex((l) => l === 'M64 P1'));
+  };
+
+  test('feeds down to Load Z with the drawbar open, then clamps there', () => {
+    for (const taperBlow of [true, false]) {
+      const lines = pickup({ atcProfile: 'sienci', taperBlow });
+      const clamp = lines.indexOf('M65 P1');
+      assert.ok(clamp > 0, 'clamps');
+      assert.ok(lines.slice(0, clamp).some((l) => /^G53 G[01] Z-100( |$)/.test(l)), 'reaches Load Z before the clamp');
+      assert.ok(!lines.some((l) => /^G53 G[01] Z-99( |$)/.test(l)), 'never stops 1 mm high');
+      assert.ok(!lines.slice(clamp).some((l) => /^G53 G1 Z-100 F300/.test(l)), 'no seat move after the clamp');
+    }
+  });
+
+  test('other profiles keep the 1 mm clamp-and-seat', () => {
+    const lines = pickup({});
+    const clamp = lines.indexOf('M65 P1');
+    assert.ok(lines.slice(0, clamp).some((l) => /^G53 G[01] Z-99( |$)/.test(l)));
+    assert.ok(lines.slice(clamp).includes('G53 G1 Z-100 F300'));
+  });
+});
+
 describe('Sienci profile slide speed', () => {
   test('uses the kit value even when an imperial save stored 50800', () => {
     assert.equal(buildInitialConfig({ atcProfile: 'sienci', slideSpeed: 50800 }).slideSpeed, 2000);
