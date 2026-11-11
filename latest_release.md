@@ -1,4 +1,4 @@
 ## What's Changed
 
 ### 🐛 Bug Fixes
-- Sienci tool pickups now clamp at the Load Z height instead of 1 mm above it
+- Fixed the ATC keepout zone in Custom layout. It now follows your slot positions and no longer stays in the home corner.
