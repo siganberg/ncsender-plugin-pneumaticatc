@@ -3516,23 +3516,41 @@
   // when the fetches fail — the setting is still valid, just wider.
   async function computeKeepoutFromSettings(p) {
     if (!p.slots || p.slots < 1) return null;
-    var slotsN = p.slots;
-    var slot1 = p.slot1;
-    var slotDist = p.slotDistance || 0;
     var pad = p.keepoutPadding || 0;
-    var dirSign = p.direction === 'Positive' ? 1 : -1;
-    var orientationY = p.orientation === 'Y';
-    var slot1Par  = orientationY ? slot1.y : slot1.x;
-    var slot1Perp = orientationY ? slot1.x : slot1.y;
-    var slotNPar  = slot1Par + (slotsN - 1) * slotDist * dirSign;
-    var parMin  = Math.min(slot1Par, slotNPar) - pad;
-    var parMax  = Math.max(slot1Par, slotNPar) + pad;
-    var perpMin = slot1Perp - pad;
-    var perpMax = slot1Perp + pad;
-    var minX = orientationY ? perpMin : parMin;
-    var maxX = orientationY ? perpMax : parMax;
-    var minY = orientationY ? parMin  : perpMin;
-    var maxY = orientationY ? parMax  : perpMax;
+    var minX, maxX, minY, maxY;
+
+    if (p.layoutMode === 'custom') {
+      // Custom layout: every slot has its own position (e.g. two rows), so
+      // the zone is the box around all of them. The linear fields below
+      // are left at their defaults in this mode and must not be used.
+      var coords = (p.slotCoords || []).filter(function(c) {
+        return c && Number.isFinite(c.x) && Number.isFinite(c.y);
+      });
+      if (coords.length === 0) return null;
+      var xs = coords.map(function(c) { return c.x; });
+      var ys = coords.map(function(c) { return c.y; });
+      minX = Math.min.apply(null, xs) - pad;
+      maxX = Math.max.apply(null, xs) + pad;
+      minY = Math.min.apply(null, ys) - pad;
+      maxY = Math.max.apply(null, ys) + pad;
+    } else {
+      var slotsN = p.slots;
+      var slot1 = p.slot1;
+      var slotDist = p.slotDistance || 0;
+      var dirSign = p.direction === 'Positive' ? 1 : -1;
+      var orientationY = p.orientation === 'Y';
+      var slot1Par  = orientationY ? slot1.y : slot1.x;
+      var slot1Perp = orientationY ? slot1.x : slot1.y;
+      var slotNPar  = slot1Par + (slotsN - 1) * slotDist * dirSign;
+      var parMin  = Math.min(slot1Par, slotNPar) - pad;
+      var parMax  = Math.max(slot1Par, slotNPar) + pad;
+      var perpMin = slot1Perp - pad;
+      var perpMax = slot1Perp + pad;
+      minX = orientationY ? perpMin : parMin;
+      maxX = orientationY ? perpMax : parMax;
+      minY = orientationY ? parMin  : perpMin;
+      maxY = orientationY ? parMax  : perpMax;
+    }
 
     var limits = await getMachineLimits();
     if (limits) {
