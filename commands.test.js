@@ -3436,3 +3436,132 @@ describe('cup approach speed: rapid to 5 mm above the slot, then feed', () => {
     assert.ok(!unload.some((l) => / F250$/.test(l)), unload.join('\n'));
   });
 });
+
+
+// === Rack slider / cover: an output that opens the rack ===
+//
+// Some racks slide out of the way or sit under a cover. With an output set
+// for it, the plugin opens the rack only when a change goes there, and closes
+// it again: as soon as the spindle has left ('rack'), or at the end of the
+// change ('change'). Never for the probe holder or a hand-fitted tool.
+describe('rack slider output', () => {
+  const OPEN = '(DONGLE:xio:out 2 1)';
+  const CLOSE = '(DONGLE:xio:out 2 0)';
+  const PROBE = 99;   // probe auto-loader
+  const HAND = 7;     // above the 4-slot rack, not the probe: fitted by hand
+  const cfg = (extra = {}) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -120 }, slotDistance: 80,
+    zSafe: -5, clampAuxOutput: 0, rackHolding: 'Fork', tlsMode: 'always',
+    toolsetter: { x: 300, y: 300 }, manualTool: { x: 500, y: 500 },
+    rackCoverOutput: 'bridge:2', rackCoverMode: 'rack', rackCoverSec: 2,
+    probe: { enabled: true, toolNumber: PROBE, holding: 'Fork', slideAxis: 'X',
+             slideDirection: 'Negative', slideDistance: 30, slideSpeed: 700, x: 200, y: -100, z: -90,
+             verify: { enabled: false } },
+    ...extra,
+  });
+  const lines = (s, from, to, storedTlo = 0, options = {}) => {
+    const r = buildToolChangeProgram(s, from, to, { x: 0, y: 0, z: 0 }, storedTlo, { x: 0, y: 0 }, options);
+    return (Array.isArray(r) ? r.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')) : [String(r)])
+      .join('\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  };
+  const at = (ls, test) => ls.findIndex((l) => (typeof test === 'string' ? l === test : test.test(l)));
+  const count = (ls, line) => ls.filter((l) => l === line).length;
+  const RACK = [1, 2, 3, 4];
+  const OFF_RACK = [0, PROBE, HAND];
+
+  test('with no output set the program has no rack switching at all', () => {
+    for (const [from, to] of [[0, 1], [1, 2], [2, 0], [1, PROBE], [HAND, 3]]) {
+      const ls = lines(cfg({ rackCoverOutput: -1 }), from, to);
+      assert.ok(!ls.some((l) => /the rack\)$/.test(l) && /^\((Open|Close)/.test(l)), `${from}->${to}`);
+    }
+  });
+
+  test('a change that never goes to the rack leaves it closed', () => {
+    for (const mode of ['rack', 'change']) {
+      for (const from of OFF_RACK) for (const to of OFF_RACK) {
+        if (from === to) continue;
+        const ls = lines(cfg({ rackCoverMode: mode }), from, to);
+        assert.equal(count(ls, OPEN) + count(ls, CLOSE), 0, `${mode} ${from}->${to}`);
+      }
+    }
+  });
+
+  test('a change that goes to the rack opens it once and closes it once, in that order', () => {
+    for (const mode of ['rack', 'change']) for (const tlsMode of ['always', 'library']) {
+      const all = [0, ...RACK, PROBE, HAND];
+      for (const from of all) for (const to of all) {
+        if (from === to || !(RACK.includes(from) || RACK.includes(to))) continue;
+        const ls = lines(cfg({ rackCoverMode: mode, tlsMode }), from, to, tlsMode === 'library' ? -42.5 : 0);
+        const tag = `${mode}/${tlsMode} ${from}->${to}`;
+        assert.equal(count(ls, OPEN), 1, `${tag}: opens`);
+        assert.equal(count(ls, CLOSE), 1, `${tag}: closes`);
+        assert.ok(at(ls, OPEN) < at(ls, CLOSE), `${tag}: order`);
+        // Each switch waits for the queued moves, then for the slider.
+        for (const sw of [OPEN, CLOSE]) {
+          assert.equal(ls[at(ls, sw) - 1], 'G4 P0', `${tag}: synced`);
+          assert.equal(ls[at(ls, sw) + 1], 'G4 P2', `${tag}: travel time`);
+        }
+      }
+    }
+  });
+
+  test('the switch lines are never inside an o-word branch', () => {
+    const all = [0, ...RACK, PROBE, HAND];
+    const variants = [
+      {}, { keepZero: true }, { keepZero: true, libraryIfRefMatches: -40 },
+    ];
+    for (const tlsMode of ['always', 'library']) for (const options of variants) {
+      for (const from of all) for (const to of all) {
+        if (from === to) continue;
+        const ls = lines(cfg({ tlsMode }), from, to, -42.5, options);
+        let depth = 0;
+        for (const l of ls) {
+          const u = l.toUpperCase();
+          if (/^O\d+\s+(ENDIF|ENDWHILE|ENDREPEAT)/.test(u)) depth -= 1;
+          if (l === OPEN || l === CLOSE) assert.equal(depth, 0, `${tlsMode} ${JSON.stringify(options)} ${from}->${to}: ${l}`);
+          if (/^O\d+\s+(IF|WHILE|REPEAT)\b/.test(u)) depth += 1;
+        }
+      }
+    }
+  });
+
+  test("'rack': it closes before the tool length measurement", () => {
+    for (const from of [0, 2, PROBE, HAND]) {
+      const ls = lines(cfg(), from, 1);
+      assert.ok(at(ls, CLOSE) < at(ls, /^G38\.2 /), `${from}->1`);
+    }
+  });
+
+  test("'change': it stays open through the measurement and closes at the end", () => {
+    const ls = lines(cfg({ rackCoverMode: 'change' }), 2, 1);
+    assert.ok(at(ls, CLOSE) > at(ls, /^G38\.2 /));
+    assert.ok(at(ls, OPEN) < at(ls, /^M5$/) + 12, 'opens at the start');
+  });
+
+  test("'rack': from a rack tool to the probe or a hand tool it closes before the pickup or the prompt", () => {
+    const toProbe = lines(cfg(), 2, PROBE);
+    assert.ok(at(toProbe, CLOSE) < at(toProbe, 'G53 G0 X200 Y-100'), 'before the move onto the holder');
+    assert.ok(at(toProbe, CLOSE) > at(toProbe, 'M61 Q0'), 'after the rack unload');
+    const toHand = lines(cfg(), 2, HAND);
+    assert.ok(at(toHand, CLOSE) < at(toHand, /PLUGIN_PNEUMATICATC:MANUAL_/), 'before the manual prompt');
+  });
+
+  test("'rack': from the probe or a hand tool to a rack tool it opens only after that tool is put away", () => {
+    const fromHand = lines(cfg(), HAND, 2);
+    assert.ok(at(fromHand, OPEN) > at(fromHand, /PLUGIN_PNEUMATICATC:MANUAL_/), 'after the manual prompt');
+    const fromProbe = lines(cfg(), PROBE, 2);
+    assert.ok(at(fromProbe, OPEN) > at(fromProbe, /probeUnload|probe.*holder/i), 'after the probe is back');
+  });
+
+  test('a controller aux output works the same way', () => {
+    const ls = lines(cfg({ rackCoverOutput: 3 }), 0, 1);
+    assert.equal(count(ls, 'M64 P3'), 1);
+    assert.equal(count(ls, 'M65 P3'), 1);
+    assert.equal(ls[at(ls, 'M64 P3') - 1], 'G4 P0');
+  });
+
+  test('the clamp output can never be the rack output', () => {
+    assert.equal(buildInitialConfig({ clampAuxOutput: 'bridge:2', rackCoverOutput: 'bridge:2' }).rackCoverOutput, -1);
+    assert.equal(buildInitialConfig({ clampAuxOutput: 1, rackCoverOutput: 1 }).rackCoverOutput, -1);
+  });
+});

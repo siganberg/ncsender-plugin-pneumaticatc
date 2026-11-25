@@ -326,6 +326,19 @@ const buildInitialConfig = (raw = {}) => {
     // Spindle stopped this long before the pump switches off (the choices the
     // Advanced tab offers; 30 s is for testing).
     waterPumpIdleSec: [30, 300, 600, 900, 1200].includes(Number(raw.waterPumpIdleSec)) ? Number(raw.waterPumpIdleSec) : 600,
+    // Output that opens a rack slider or cover (-1 = none; on = open). Never
+    // the clamp or pump output. See rackCover.
+    rackCoverOutput: (() => {
+      const v = sanitizeAuxOutput(raw.rackCoverOutput);
+      const taken = [String(sanitizeAuxOutput(raw.clampAuxOutput)), String(raw.waterPumpOutput ?? '')];
+      return taken.includes(String(v)) ? -1 : v;
+    })(),
+    // 'rack': open only while the spindle is at the rack. 'change': open for
+    // the whole tool change. Either way it stays closed when the change
+    // never goes to the rack.
+    rackCoverMode: raw.rackCoverMode === 'change' ? 'change' : 'rack',
+    // How long the slider takes to move; the spindle waits this long.
+    rackCoverSec: [0.5, 1, 1.5, 2, 3, 5, 8, 10].includes(Number(raw.rackCoverSec)) ? Number(raw.rackCoverSec) : 2,
 
     dialogBehavior: {
       countdownSec: toFiniteNumber(raw.dialogBehavior?.countdownSec, 5),
@@ -582,6 +595,23 @@ function waterPumpSetup(settings) {
 
 const NO_OUTPUT = { on: '', off: '', setup: '', device: null, isRelease: () => false };
 
+// A rack that slides out of the way, or sits under a cover: one output opens
+// it (on) and closes it (off). Each switch waits for the moves queued before
+// it (G4 P0), then for the slider to finish, so the spindle never heads into
+// a rack that is still moving. Only on/off of the output is used: the setup
+// of a Wireless I/O output would give it the drawbar's role.
+function rackCover(settings) {
+  const out = outputFor(settings.rackCoverOutput);
+  if (!out.on || !out.off) return { open: '', close: '', device: null };
+  const synced = (cmd) => (cmd.startsWith('G4 P0') ? cmd : `G4 P0\n${cmd}`);
+  const wait = `G4 P${settings.rackCoverSec}`;
+  return {
+    open: `(Open the rack)\n${synced(out.on)}\n${wait}`,
+    close: `(Close the rack)\n${synced(out.off)}\n${wait}`,
+    device: out.device,
+  };
+}
+
 function outputFor(value) {
   const provider = OUTPUT_PROVIDERS.find((p) => p.match(value));
   return provider ? provider.create(value) : NO_OUTPUT;
@@ -597,6 +627,7 @@ function auxOnOff(auxOutput) {
 // a sequence whose release and clamp would go nowhere.
 function requireOutputDevice(commands, settings) {
   const device = outputFor(settings.clampAuxOutput).device
+    || rackCover(settings).device
     || inputFor(settings.drawbarInput).device
     || inputFor(settings.toolSensorInput).device;
   if (!device) return;
@@ -2164,6 +2195,32 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     && !targetIsManual
     && !options.forceTls
     && typeof refLibTlo === 'number' && Math.abs(refLibTlo) > 0.0001;
+  // Rack slider / cover (see rackCover). It opens only when this change
+  // goes to the rack, and never for the probe holder or a hand-fitted tool.
+  //   'change'  open at the start, closed at the end.
+  //   'rack'    open just before the spindle heads for the rack, closed as
+  //             soon as it has left for good: before the measurement, the
+  //             probe pickup or the manual prompt. Where the change ends at
+  //             the rack anyway (no measurement, or unload to T0) it closes
+  //             at the end.
+  // The switch lines are never put inside an o-word branch: a Wireless I/O
+  // line is sent by ncSender even from the branch the controller skips, which
+  // would close the rack while the spindle is in it. So with branchOnRef the
+  // rack closes at the end.
+  const cover = rackCover(settings);
+  const onRack = (n) => n > 0 && n <= settings.slots && !isProbeTool(settings, n);
+  const sourceOnRack = onRack(currentTool);
+  const targetOnRack = onRack(toolNumber);
+  const coverUsed = !!cover.open && (sourceOnRack || targetOnRack);
+  const coverAtRackOnly = coverUsed && settings.rackCoverMode !== 'change';
+  const closeBeforeTls = coverAtRackOnly && targetOnRack && chainedFromRackExit && !targetIsProbe && !branchOnRef;
+  const closeBeforeOffRackLoad = coverAtRackOnly && sourceOnRack && !targetOnRack && toolNumber !== 0;
+  const closeAtEnd = coverUsed && !closeBeforeTls && !closeBeforeOffRackLoad;
+  const openAtStart = coverUsed && !coverAtRackOnly;
+  const openBeforeUnload = coverAtRackOnly && sourceOnRack;
+  const openBeforeLoad = coverAtRackOnly && !sourceOnRack && targetOnRack;
+  const thenClose = (section) => `${section}\n    G53 G0 Z${settings.zSafe}\n    ${cover.close}`;
+
   const rawTlsRoutine = shouldProbe
     ? createToolLengthSetRoutine(settings, toolOffsets, { skipXYApproach: chainedFromRackExit, originMPos: tlsRouteFrom, mode: branchOnRef ? 'measure' : (keepViaReference ? 'keepRef' : 'normal') }).join('\n')
     : (settings.tlsMode === 'library' && hasStoredTlo
@@ -2174,7 +2231,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   const tlsRoutine = chainedFromRackExit
     ? `${settings.rackHolding === 'Cup'
         ? cupExit(targetSlot.engaged, { x: tlsX, y: tlsY }, settings)
-        : rackExitToTLS(targetSlot.engaged, tlsX, tlsY, settings)}\n${rawTlsRoutine}`
+        : rackExitToTLS(targetSlot.engaged, tlsX, tlsY, settings)}\n${closeBeforeTls ? `${cover.close}\n` : ''}${rawTlsRoutine}`
     : rawTlsRoutine;
 
   // Every time we probe (both modes), arm the writeback so the next
@@ -2244,7 +2301,8 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
           ? cupExit(sourceSlot.engaged, holder.approach, settings)
           : rackExit(sourceSlot.engaged, holder.approach, settings))
       : probeRoute(fromXY, holder.approach, settings);
-    loadSection = buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased);
+    // Rack tool -> probe: the spindle is clear of the rack and over the holder.
+    loadSection = buildProbeLoad(settings, closeBeforeOffRackLoad && chainedFromRack ? thenClose(entrance) : entrance, tlsRoutine, drawbarAlreadyReleased);
   } else {
     // Rack unload → manual load: leave the rack the way a rack exit does.
     const manualEntrance = targetIsManual && chainedFromRack
@@ -2252,7 +2310,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
           ? cupExit(sourceSlot.engaged, settings.manualTool, settings)
           : rackExit(sourceSlot.engaged, settings.manualTool, settings))
       : undefined;
-    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo, manualEntrance);
+    // Rack tool -> hand tool: the rack closes once the spindle is at the
+    // manual station, before the prompt.
+    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo,
+      manualEntrance && closeBeforeOffRackLoad ? thenClose(manualEntrance) : manualEntrance);
   }
 
   // Tx → T0 leaves the drawbar released after the unload (there is no
@@ -2379,9 +2440,13 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     ${sienciKeepout(settings).off}
     ${pressureGuard(settings, 120)}
     G53 G0 Z${settings.zSafe}
+    ${openAtStart ? cover.open : ''}
     ${zeroKeepSection}
+    ${openBeforeUnload ? cover.open : ''}
     ${unloadSection}
+    ${openBeforeLoad ? cover.open : ''}
     ${swapBody}
+    ${closeAtEnd ? cover.close : ''}
     G4 P0
     ${sienciKeepout(settings).on}
     G[#<return_units>]

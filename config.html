@@ -1904,6 +1904,48 @@
             </select>
           </div>
         </div>
+
+        <div class="pa-card" id="pa-adv-rack-cover-card">
+          <h3 class="pa-card-title">Rack Slider / Cover</h3>
+          <p class="pa-card-help">
+            For a rack that slides out of the way or sits under a cover, moved by one output: on opens it, off closes it. The plugin opens it only when a tool change goes to the rack, and waits for it to finish moving before the spindle goes in. It stays closed when the probe or a hand-fitted tool is changed. Go to Slot does not open it: open it yourself first.
+          </p>
+          <div class="pa-form-row">
+            <label class="pa-form-label" for="pa-adv-rack-cover-output">
+              Output
+              <span class="pa-help-tip" title="The output that opens the rack. On = open, off = closed. It cannot be the clamp or the water pump output.">?</span>
+            </label>
+            <select id="pa-adv-rack-cover-output" class="pa-select">
+              <option value="-1">Disabled</option>
+            </select>
+          </div>
+          <div class="pa-form-row" id="pa-adv-rack-cover-mode-row" style="display: none">
+            <label class="pa-form-label" for="pa-adv-rack-cover-mode">
+              Open
+              <span class="pa-help-tip" title="Only while at the rack: it opens just before the spindle heads for the rack and closes once the spindle has left, before the tool length measurement, the probe pickup or the manual prompt. For the whole tool change: it opens at the start and closes at the end.">?</span>
+            </label>
+            <select id="pa-adv-rack-cover-mode" class="pa-select">
+              <option value="rack">Only while at the rack</option>
+              <option value="change">For the whole tool change</option>
+            </select>
+          </div>
+          <div class="pa-form-row" id="pa-adv-rack-cover-sec-row" style="display: none">
+            <label class="pa-form-label" for="pa-adv-rack-cover-sec">
+              Travel Time
+              <span class="pa-help-tip" title="How long the slider or cover takes to open or close. The spindle waits this long after each switch. Set it a little longer than the real travel.">?</span>
+            </label>
+            <select id="pa-adv-rack-cover-sec" class="pa-select">
+              <option value="0.5">0.5 seconds</option>
+              <option value="1">1 second</option>
+              <option value="1.5">1.5 seconds</option>
+              <option value="2">2 seconds</option>
+              <option value="3">3 seconds</option>
+              <option value="5">5 seconds</option>
+              <option value="8">8 seconds</option>
+              <option value="10">10 seconds</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <!-- This tab was preview-only when it was built, so it never had a
@@ -3018,6 +3060,11 @@
         }
       }
       fill($('pa-clamp-aux'), false, initialConfig.clampAuxOutput);
+      // Keep what is picked now: the list may be rebuilt after the user chose.
+      var rackSel = $('pa-adv-rack-cover-output');
+      fill(rackSel, true, rackSel ? rackSel.value : -1);
+      if (rackSel && rackSel.selectedIndex < 0) rackSel.value = '-1';
+      showRackCoverRows();
       // Re-apply the profile now the real option names exist, so a locked
       // field shows "Aux Out P1" (or the user's alias) rather than a
       // placeholder — and so the value survives the list being rebuilt.
@@ -3128,6 +3175,25 @@
       if (on) $('pa-adv-water-pump-output').value = pump;
       $('pa-adv-water-pump-idle').value = String(initialConfig.waterPumpIdleSec || 600);
       showWaterPumpRow();
+    })();
+    (function() {
+      // The real output list arrives later (populateAuxOutputs); until then
+      // the saved choice is its own option, so a save can't lose it.
+      var sel = $('pa-adv-rack-cover-output');
+      var saved = initialConfig.rackCoverOutput;
+      var has = saved !== undefined && saved !== null && saved !== '' && String(saved) !== '-1';
+      if (has) {
+        var opt = document.createElement('option');
+        opt.value = String(saved);
+        opt.textContent = /^bridge:[0-3]$/.test(String(saved))
+          ? 'Wireless I/O OUT' + (Number(String(saved).slice(7)) + 1)
+          : (typeof saved === 'number' ? 'Aux Out P' + saved : String(saved));
+        sel.appendChild(opt);
+        sel.value = String(saved);
+      }
+      $('pa-adv-rack-cover-mode').value = initialConfig.rackCoverMode === 'change' ? 'change' : 'rack';
+      $('pa-adv-rack-cover-sec').value = String(initialConfig.rackCoverSec || 2);
+      showRackCoverRows();
     })();
 
     // Profile last, so it can lock/overwrite the pin fields it owns. Silent:
@@ -3291,6 +3357,15 @@
     if (idleRow) idleRow.style.display = $('pa-adv-water-pump').checked ? '' : 'none';
   }
   $('pa-adv-water-pump').addEventListener('change', showWaterPumpRow);
+  function showRackCoverRows() {
+    var sel = $('pa-adv-rack-cover-output');
+    var on = !!sel && sel.value !== '-1' && sel.value !== '';
+    ['pa-adv-rack-cover-mode-row', 'pa-adv-rack-cover-sec-row'].forEach(function(id) {
+      var row = $(id);
+      if (row) row.style.display = on ? '' : 'none';
+    });
+  }
+  $('pa-adv-rack-cover-output').addEventListener('change', showRackCoverRows);
   function showQuickReleaseRow() {
     var row = $('pa-adv-quick-release-sec-row');
     if (row) row.style.display = $('pa-adv-quick-release').checked ? '' : 'none';
@@ -3383,6 +3458,10 @@
       // Wireless I/O itself switches it from the spindle speed (role <n> pump).
       waterPumpOutput: $('pa-adv-water-pump').checked ? $('pa-adv-water-pump-output').value : '',
       waterPumpIdleSec: parseInt($('pa-adv-water-pump-idle').value, 10) || 600,
+      // Output that opens a rack slider or cover (-1 = none), and when.
+      rackCoverOutput: parseAuxValue($('pa-adv-rack-cover-output')),
+      rackCoverMode: $('pa-adv-rack-cover-mode').value === 'change' ? 'change' : 'rack',
+      rackCoverSec: parseFloat($('pa-adv-rack-cover-sec').value) || 2,
       rackHolding: $('pa-rack-holding').value || 'Fork',
 
       orientation: segOrientation ? segOrientation.get() : 'Y',
@@ -3617,6 +3696,9 @@
     var payload = gatherFormData();
     if (payload.waterPumpOutput && payload.waterPumpOutput === String(payload.clampAuxOutput))
       throw new Error('the water pump and the clamp valve are on the same Wireless I/O output. Pick another pump output.');
+    if (String(payload.rackCoverOutput) !== '-1'
+        && (String(payload.rackCoverOutput) === String(payload.clampAuxOutput) || String(payload.rackCoverOutput) === String(payload.waterPumpOutput)))
+      throw new Error('the rack slider is on the same output as the clamp valve or the water pump. Pick another output for it.');
     var res = await fetch(BASE_URL + '/api/plugins/com.ncsender.pneumaticatc/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
