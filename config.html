@@ -1908,7 +1908,7 @@
         <div class="pa-card" id="pa-adv-rack-cover-card">
           <h3 class="pa-card-title">Rack Slider / Cover</h3>
           <p class="pa-card-help">
-            For a rack that slides out of the way or sits under a cover, moved by one output: on opens it, off closes it. The plugin opens it only when a tool change goes to the rack, and waits for it to finish moving before the spindle goes in. It stays closed when the probe or a hand-fitted tool is changed. Go to Slot does not open it: open it yourself first.
+            For a rack that slides out of the way or sits under a cover, moved by one output: on opens it, off closes it. The plugin opens it only when a tool change goes to the rack, and waits for it to finish moving before the spindle goes in. It stays closed when a hand-fitted tool is changed, and for the probe unless its holder is on the rack (below). Go to Slot does not open it: open it yourself first.
           </p>
           <div class="pa-form-row">
             <label class="pa-form-label" for="pa-adv-rack-cover-output">
@@ -1928,6 +1928,16 @@
               <option value="rack">Only while at the rack</option>
               <option value="change">For the whole tool change</option>
             </select>
+          </div>
+          <div class="pa-field-inline" id="pa-adv-rack-cover-probe-row" style="display: none">
+            <label for="pa-adv-rack-cover-probe">
+              Probe holder is on the rack
+              <span class="pa-help-tip" title="On: picking up or putting down the probe opens the rack too, because its holder moves with the rack or sits under the same cover. Off: the probe holder is somewhere else and the rack stays closed for it.">?</span>
+            </label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-adv-rack-cover-probe">
+              <span class="pa-toggle-slider"></span>
+            </label>
           </div>
           <div class="pa-form-row" id="pa-adv-rack-cover-sec-row" style="display: none">
             <label class="pa-form-label" for="pa-adv-rack-cover-sec">
@@ -3193,6 +3203,7 @@
       }
       $('pa-adv-rack-cover-mode').value = initialConfig.rackCoverMode === 'change' ? 'change' : 'rack';
       $('pa-adv-rack-cover-sec').value = String(initialConfig.rackCoverSec || 2);
+      $('pa-adv-rack-cover-probe').checked = !!initialConfig.rackCoverForProbe;
       showRackCoverRows();
     })();
 
@@ -3360,7 +3371,7 @@
   function showRackCoverRows() {
     var sel = $('pa-adv-rack-cover-output');
     var on = !!sel && sel.value !== '-1' && sel.value !== '';
-    ['pa-adv-rack-cover-mode-row', 'pa-adv-rack-cover-sec-row'].forEach(function(id) {
+    ['pa-adv-rack-cover-mode-row', 'pa-adv-rack-cover-probe-row', 'pa-adv-rack-cover-sec-row'].forEach(function(id) {
       var row = $(id);
       if (row) row.style.display = on ? '' : 'none';
     });
@@ -3462,6 +3473,7 @@
       rackCoverOutput: parseAuxValue($('pa-adv-rack-cover-output')),
       rackCoverMode: $('pa-adv-rack-cover-mode').value === 'change' ? 'change' : 'rack',
       rackCoverSec: parseFloat($('pa-adv-rack-cover-sec').value) || 2,
+      rackCoverForProbe: $('pa-adv-rack-cover-probe').checked,
       rackHolding: $('pa-rack-holding').value || 'Fork',
 
       orientation: segOrientation ? segOrientation.get() : 'Y',

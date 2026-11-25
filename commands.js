@@ -337,6 +337,9 @@ const buildInitialConfig = (raw = {}) => {
     // the whole tool change. Either way it stays closed when the change
     // never goes to the rack.
     rackCoverMode: raw.rackCoverMode === 'change' ? 'change' : 'rack',
+    // The probe holder sits on the sliding rack (or under the cover) too, so
+    // a probe pickup or put-down opens it. Off: the holder is elsewhere.
+    rackCoverForProbe: !!raw.rackCoverForProbe,
     // How long the slider takes to move; the spindle waits this long.
     rackCoverSec: [0.5, 1, 1.5, 2, 3, 5, 8, 10].includes(Number(raw.rackCoverSec)) ? Number(raw.rackCoverSec) : 2,
 
@@ -608,8 +611,39 @@ function rackCover(settings) {
   return {
     open: `(Open the rack)\n${synced(out.on)}\n${wait}`,
     close: `(Close the rack)\n${synced(out.off)}\n${wait}`,
+    // Closing behind a spindle that is already clear and moving away: no
+    // reason to stand still while the rack travels.
+    closeBehind: `(Close the rack)\n${synced(out.off)}`,
     device: out.device,
   };
+}
+
+// Put the rack's close into an exit from a rack slot, right after the move
+// that takes the spindle out of the rack's keepout box, so the rack is not
+// left open for the trip that follows (to the tool setter, the manual
+// station, the probe holder or back to the work). An exit whose moves can't
+// be read as leaving the box gets the close at its end.
+function closeOnceClear(exit, fromXY, close, settings) {
+  const zone = computeKeepoutZone(settings);
+  const EPS = 0.0005;
+  const inside = (p) => p.x > zone.minX + EPS && p.x < zone.maxX - EPS
+    && p.y > zone.minY + EPS && p.y < zone.maxY - EPS;
+  const pos = { x: fromXY.x, y: fromXY.y };
+  const lines = String(exit).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim().startsWith('(') || !/G0*53(?![0-9])/i.test(line)) continue;
+    const x = /X(-?\d*\.?\d+)/i.exec(line);
+    const y = /Y(-?\d*\.?\d+)/i.exec(line);
+    if (!x && !y) continue;
+    if (x) pos.x = Number(x[1]);
+    if (y) pos.y = Number(y[1]);
+    if (!inside(pos)) {
+      lines.splice(i + 1, 0, `    ${close}`);
+      return lines.join('\n');
+    }
+  }
+  return `${exit}\n    ${close}`;
 }
 
 function outputFor(value) {
@@ -2196,30 +2230,40 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     && !options.forceTls
     && typeof refLibTlo === 'number' && Math.abs(refLibTlo) > 0.0001;
   // Rack slider / cover (see rackCover). It opens only when this change
-  // goes to the rack, and never for the probe holder or a hand-fitted tool.
+  // goes to the rack: never for a hand-fitted tool, and for the probe holder
+  // only when that is on the rack too (rackCoverForProbe). After a probe
+  // pickup the spindle is still over the rack, so that change closes at the
+  // end.
   //   'change'  open at the start, closed at the end.
   //   'rack'    open just before the spindle heads for the rack, closed as
-  //             soon as it has left for good: before the measurement, the
-  //             probe pickup or the manual prompt. Where the change ends at
-  //             the rack anyway (no measurement, or unload to T0) it closes
-  //             at the end.
+  //             soon as it has left the rack's keepout box for good (see
+  //             closeOnceClear): before the trip to the tool setter, the
+  //             probe holder, the manual station or back to the work.
   // The switch lines are never put inside an o-word branch: a Wireless I/O
   // line is sent by ncSender even from the branch the controller skips, which
   // would close the rack while the spindle is in it. So with branchOnRef the
   // rack closes at the end.
   const cover = rackCover(settings);
   const onRack = (n) => n > 0 && n <= settings.slots && !isProbeTool(settings, n);
-  const sourceOnRack = onRack(currentTool);
-  const targetOnRack = onRack(toolNumber);
+  const probeOnRack = (isProbe) => isProbe && settings.rackCoverForProbe;
+  const sourceSlot_ = onRack(currentTool);
+  const targetSlot_ = onRack(toolNumber);
+  const sourceOnRack = sourceSlot_ || probeOnRack(sourceIsProbe);
+  const targetOnRack = targetSlot_ || probeOnRack(targetIsProbe);
   const coverUsed = !!cover.open && (sourceOnRack || targetOnRack);
   const coverAtRackOnly = coverUsed && settings.rackCoverMode !== 'change';
-  const closeBeforeTls = coverAtRackOnly && targetOnRack && chainedFromRackExit && !targetIsProbe && !branchOnRef;
-  const closeBeforeOffRackLoad = coverAtRackOnly && sourceOnRack && !targetOnRack && toolNumber !== 0;
-  const closeAtEnd = coverUsed && !closeBeforeTls && !closeBeforeOffRackLoad;
+  // The two mid-change closes hang on a rack SLOT's exit route, which is
+  // what takes the spindle clear of the rack.
+  const closeBeforeTls = coverAtRackOnly && targetSlot_ && chainedFromRackExit && !targetIsProbe && !branchOnRef;
+  const closeBeforeOffRackLoad = coverAtRackOnly && sourceSlot_ && !targetOnRack && toolNumber !== 0;
+  // No measurement and nothing more to load: the exit leaves from a rack slot.
+  const closeInExit = coverAtRackOnly && !closeBeforeTls && !closeBeforeOffRackLoad && !branchOnRef
+    && ((toolNumber === 0 && sourceSlot_) || (targetSlot_ && !shouldProbe && !targetIsProbe));
+  const closeAtEnd = coverUsed && !closeBeforeTls && !closeBeforeOffRackLoad && !closeInExit;
   const openAtStart = coverUsed && !coverAtRackOnly;
   const openBeforeUnload = coverAtRackOnly && sourceOnRack;
   const openBeforeLoad = coverAtRackOnly && !sourceOnRack && targetOnRack;
-  const thenClose = (section) => `${section}\n    G53 G0 Z${settings.zSafe}\n    ${cover.close}`;
+  const closeLeaving = (exit, slotXY) => closeOnceClear(exit, slotXY, cover.closeBehind, settings);
 
   const rawTlsRoutine = shouldProbe
     ? createToolLengthSetRoutine(settings, toolOffsets, { skipXYApproach: chainedFromRackExit, originMPos: tlsRouteFrom, mode: branchOnRef ? 'measure' : (keepViaReference ? 'keepRef' : 'normal') }).join('\n')
@@ -2228,10 +2272,13 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
         : '');
   const tlsX = settings.toolsetter.x + (toolOffsets.x || 0);
   const tlsY = settings.toolsetter.y + (toolOffsets.y || 0);
-  const tlsRoutine = chainedFromRackExit
-    ? `${settings.rackHolding === 'Cup'
+  const exitToTls = chainedFromRackExit
+    ? (settings.rackHolding === 'Cup'
         ? cupExit(targetSlot.engaged, { x: tlsX, y: tlsY }, settings)
-        : rackExitToTLS(targetSlot.engaged, tlsX, tlsY, settings)}\n${closeBeforeTls ? `${cover.close}\n` : ''}${rawTlsRoutine}`
+        : rackExitToTLS(targetSlot.engaged, tlsX, tlsY, settings))
+    : '';
+  const tlsRoutine = chainedFromRackExit
+    ? `${closeBeforeTls ? closeLeaving(exitToTls, targetSlot.engaged) : exitToTls}\n${rawTlsRoutine}`
     : rawTlsRoutine;
 
   // Every time we probe (both modes), arm the writeback so the next
@@ -2301,8 +2348,8 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
           ? cupExit(sourceSlot.engaged, holder.approach, settings)
           : rackExit(sourceSlot.engaged, holder.approach, settings))
       : probeRoute(fromXY, holder.approach, settings);
-    // Rack tool -> probe: the spindle is clear of the rack and over the holder.
-    loadSection = buildProbeLoad(settings, closeBeforeOffRackLoad && chainedFromRack ? thenClose(entrance) : entrance, tlsRoutine, drawbarAlreadyReleased);
+    // Rack tool -> probe: the rack closes as the spindle leaves it.
+    loadSection = buildProbeLoad(settings, closeBeforeOffRackLoad && chainedFromRack ? closeLeaving(entrance, sourceSlot.engaged) : entrance, tlsRoutine, drawbarAlreadyReleased);
   } else {
     // Rack unload → manual load: leave the rack the way a rack exit does.
     const manualEntrance = targetIsManual && chainedFromRack
@@ -2310,10 +2357,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
           ? cupExit(sourceSlot.engaged, settings.manualTool, settings)
           : rackExit(sourceSlot.engaged, settings.manualTool, settings))
       : undefined;
-    // Rack tool -> hand tool: the rack closes once the spindle is at the
-    // manual station, before the prompt.
+    // Rack tool -> hand tool: the rack closes as the spindle leaves it, so
+    // it is shut on the way to the manual station.
     loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo,
-      manualEntrance && closeBeforeOffRackLoad ? thenClose(manualEntrance) : manualEntrance);
+      manualEntrance && closeBeforeOffRackLoad ? closeLeaving(manualEntrance, sourceSlot.engaged) : manualEntrance);
   }
 
   // Tx → T0 leaves the drawbar released after the unload (there is no
@@ -2354,6 +2401,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     exitSection = isCup
       ? cupExit(targetSlot.engaged, returnTo, settings)
       : rackExitToOrigin(targetSlot.engaged, /* isEmpty */ false, returnTo, settings);
+  }
+
+  if (closeInExit && exitSection) {
+    exitSection = closeLeaving(exitSection, toolNumber === 0 ? sourceSlot.engaged : targetSlot.engaged);
   }
 
   // `returnTo` is operator-chosen, not plugin-computed — the one

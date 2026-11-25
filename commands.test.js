@@ -3496,11 +3496,10 @@ describe('rack slider output', () => {
         assert.equal(count(ls, OPEN), 1, `${tag}: opens`);
         assert.equal(count(ls, CLOSE), 1, `${tag}: closes`);
         assert.ok(at(ls, OPEN) < at(ls, CLOSE), `${tag}: order`);
-        // Each switch waits for the queued moves, then for the slider.
-        for (const sw of [OPEN, CLOSE]) {
-          assert.equal(ls[at(ls, sw) - 1], 'G4 P0', `${tag}: synced`);
-          assert.equal(ls[at(ls, sw) + 1], 'G4 P2', `${tag}: travel time`);
-        }
+        // Each switch waits for the queued moves; the spindle waits for the
+        // slider before it goes in.
+        for (const sw of [OPEN, CLOSE]) assert.equal(ls[at(ls, sw) - 1], 'G4 P0', `${tag}: synced`);
+        assert.equal(ls[at(ls, OPEN) + 1], 'G4 P2', `${tag}: travel time`);
       }
     }
   });
@@ -3523,6 +3522,51 @@ describe('rack slider output', () => {
         }
       }
     }
+  });
+
+  // The property that matters: the spindle is never inside the rack's
+  // keepout box while the rack is closed, and in 'rack' mode the rack is
+  // never open once the spindle has left that box for the last time.
+  test('the spindle is only ever inside the rack while it is open', () => {
+    const all = [0, ...RACK, PROBE, HAND];
+    for (const rackHolding of ['Fork', 'Cup']) for (const mode of ['rack', 'change']) for (const tlsMode of ['always', 'library']) {
+      for (const from of all) for (const to of all) {
+        if (from === to) continue;
+        const s = cfg({ rackHolding, rackCoverMode: mode, tlsMode });
+        const zone = computeKeepoutZone(s);
+        const inside = (p) => p.x > zone.minX + 0.001 && p.x < zone.maxX - 0.001 && p.y > zone.minY + 0.001 && p.y < zone.maxY - 0.001;
+        const ls = lines(s, from, to, tlsMode === 'library' ? -42.5 : 0);
+        const tag = `${rackHolding}/${mode}/${tlsMode} ${from}->${to}`;
+        const pos = { x: 0, y: 0 };
+        let open = false;
+        let tripsWhileOpenAfterLeaving = 0;
+        let everInside = false;
+        for (const l of ls) {
+          if (l === OPEN) { open = true; continue; }
+          if (l === CLOSE) { open = false; continue; }
+          if (l.startsWith('(') || !/G53/.test(l)) continue;
+          const x = /X(-?[\d.]+)/.exec(l), y = /Y(-?[\d.]+)/.exec(l);
+          if (!x && !y) continue;
+          const was = inside(pos);
+          if (x) pos.x = Number(x[1]);
+          if (y) pos.y = Number(y[1]);
+          const now = inside(pos);
+          if (now) { everInside = true; assert.ok(open, `${tag}: inside the rack while it is closed (${l})`); }
+          // A move between two points outside the box, made with the rack
+          // open after the spindle had already been in: the long trips.
+          if (!was && !now && open && everInside) tripsWhileOpenAfterLeaving += 1;
+        }
+        if (mode === 'rack') {
+          assert.equal(tripsWhileOpenAfterLeaving, 0, `${tag}: travels with the rack left open`);
+        }
+      }
+    }
+  });
+
+  test("'rack': from a rack tool to a hand tool it is shut before the trip to the manual station", () => {
+    const ls = lines(cfg(), 2, HAND);
+    assert.ok(at(ls, CLOSE) < at(ls, 'G53 G0 X500 Y500'));
+    assert.ok(at(ls, CLOSE) > at(ls, 'G53 G0 X-55'));
   });
 
   test("'rack': it closes before the tool length measurement", () => {
@@ -3551,6 +3595,36 @@ describe('rack slider output', () => {
     assert.ok(at(fromHand, OPEN) > at(fromHand, /PLUGIN_PNEUMATICATC:MANUAL_/), 'after the manual prompt');
     const fromProbe = lines(cfg(), PROBE, 2);
     assert.ok(at(fromProbe, OPEN) > at(fromProbe, /probeUnload|probe.*holder/i), 'after the probe is back');
+  });
+
+  test('a probe holder on the rack opens it too, when set so', () => {
+    const all = [0, ...RACK, PROBE, HAND];
+    for (const mode of ['rack', 'change']) for (const tlsMode of ['always', 'library']) {
+      for (const from of all) for (const to of all) {
+        if (from === to) continue;
+        const ls = lines(cfg({ rackCoverMode: mode, tlsMode, rackCoverForProbe: true }), from, to, tlsMode === 'library' ? -42.5 : 0);
+        const tag = `${mode}/${tlsMode} ${from}->${to}`;
+        const visits = [from, to].some((n) => RACK.includes(n) || n === PROBE);
+        assert.equal(count(ls, OPEN), visits ? 1 : 0, `${tag}: opens`);
+        assert.equal(count(ls, CLOSE), visits ? 1 : 0, `${tag}: closes`);
+        if (visits) assert.ok(at(ls, OPEN) < at(ls, CLOSE), `${tag}: order`);
+      }
+    }
+    // Open before the spindle goes onto the holder, closed only after it is done there.
+    const pick = lines(cfg({ rackCoverForProbe: true }), 0, PROBE);
+    assert.ok(at(pick, OPEN) < at(pick, 'G53 G0 X200 Y-100'));
+    assert.ok(at(pick, CLOSE) > at(pick, `M61 Q${PROBE}`));
+    const drop = lines(cfg({ rackCoverForProbe: true }), PROBE, HAND);
+    assert.ok(at(drop, OPEN) < at(drop, 'M61 Q0'));
+  });
+
+  test('a hand-fitted tool never opens it, whatever the settings', () => {
+    for (const mode of ['rack', 'change']) for (const rackCoverForProbe of [false, true]) {
+      for (const [from, to] of [[0, HAND], [HAND, 0], [HAND, HAND + 1]]) {
+        const ls = lines(cfg({ rackCoverMode: mode, rackCoverForProbe }), from, to);
+        assert.equal(count(ls, OPEN) + count(ls, CLOSE), 0, `${mode} ${from}->${to}`);
+      }
+    }
   });
 
   test('a controller aux output works the same way', () => {
