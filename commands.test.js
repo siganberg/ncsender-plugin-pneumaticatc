@@ -3436,3 +3436,98 @@ describe('cup approach speed: rapid to 5 mm above the slot, then feed', () => {
     assert.ok(!unload.some((l) => / F250$/.test(l)), unload.join('\n'));
   });
 });
+
+
+// === eventsRackOnly: the events only wrap the rack part of a change ===
+//
+// The events typically open and close a rack. With eventsRackOnly on the rack
+// is closed whenever the probe or a hand-loaded tool is picked up or put
+// down: a change that never visits the rack runs neither event, and a change
+// between a rack tool and the probe / a hand tool runs them around the rack
+// part only.
+describe('eventsRackOnly keeps the events away from the probe and hand tools', () => {
+  const PRE = '(DONGLE:xio:out 2 1)';
+  const POST = '(DONGLE:xio:out 2 0)';
+  const PROBE = 99;   // probe auto-loader
+  const HAND = 7;     // above the 4-slot rack, not the probe: a hand-loaded tool
+  const cfg = (eventsRackOnly) => buildInitialConfig({
+    slots: 4, slot1: { x: -115, y: 40, z: -120 }, slotDistance: 80,
+    zSafe: -5, clampAuxOutput: 0, rackHolding: 'Fork',
+    toolsetter: { x: 300, y: 300 }, manualTool: { x: 500, y: 500 },
+    eventsRackOnly,
+    preToolChangeGcode: PRE, postToolChangeGcode: POST,
+    probe: { enabled: true, toolNumber: PROBE, holding: 'Fork', slideAxis: 'X',
+             slideDirection: 'Negative', slideDistance: 30, slideSpeed: 700, x: 200, y: -100, z: -90,
+             verify: { enabled: false } }
+  });
+  const lines = (s, from, to) => {
+    const r = buildToolChangeProgram(s, from, to, { x: 0, y: 0, z: 0 }, 0, { x: 0, y: 0 });
+    return (Array.isArray(r) ? r.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')) : [String(r)])
+      .join('\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  };
+  const count = (ls, line) => ls.filter((l) => l === line).length;
+  const once = (ls) => {
+    assert.equal(count(ls, PRE), 1, 'pre event runs once');
+    assert.equal(count(ls, POST), 1, 'post event runs once');
+  };
+
+  test('off by default: probe and hand-tool changes still run both events', () => {
+    assert.equal(buildInitialConfig({ slots: 4 }).eventsRackOnly, false);
+    once(lines(cfg(false), 0, PROBE));
+    once(lines(cfg(false), 0, HAND));
+  });
+
+  test('on: a change that never visits the rack runs neither event', () => {
+    for (const [from, to] of [[0, PROBE], [PROBE, 0], [0, HAND], [HAND, 0], [HAND, PROBE], [PROBE, HAND], [HAND, HAND + 1]]) {
+      const ls = lines(cfg(true), from, to);
+      assert.equal(count(ls, PRE), 0, `no pre event for T${from} -> T${to}`);
+      assert.equal(count(ls, POST), 0, `no post event for T${from} -> T${to}`);
+    }
+  });
+
+  test('on: rack tool to probe closes the rack before the probe is picked up', () => {
+    const ls = lines(cfg(true), 2, PROBE);
+    once(ls);
+    const pre = ls.indexOf(PRE), post = ls.indexOf(POST);
+    const pickup = ls.findIndex((l) => l.startsWith('(probeLoad:'));
+    assert.ok(pre < pickup, 'rack opened before the rack tool is put away');
+    assert.ok(post > pickup && post < ls.indexOf('G53 G0 X200 Y-100', post), 'rack closed before the move onto the probe');
+    assert.ok(post < ls.indexOf(`M61 Q${PROBE}`), 'rack closed before the probe is in the spindle');
+  });
+
+  test('on: probe to rack tool opens the rack only after the probe is put down', () => {
+    const ls = lines(cfg(true), PROBE, 2);
+    once(ls);
+    const putDown = ls.indexOf('M61 Q0');
+    const pre = ls.indexOf(PRE), post = ls.indexOf(POST);
+    assert.ok(putDown >= 0 && pre > putDown, 'rack opened after the probe is back in its holder');
+    assert.ok(pre < ls.indexOf('M61 Q2'), 'rack opened before the rack tool is loaded');
+    assert.ok(post > ls.indexOf('M61 Q2'), 'rack closed after the rack tool is loaded');
+  });
+
+  test('on: rack tool to hand tool closes the rack before the operator dialog', () => {
+    const ls = lines(cfg(true), 2, HAND);
+    once(ls);
+    const pre = ls.indexOf(PRE), post = ls.indexOf(POST);
+    const dialog = ls.findIndex((l) => l.startsWith('(MSG, PLUGIN_PNEUMATICATC:MANUAL_'));
+    assert.ok(pre < post, 'rack opened before it is closed');
+    assert.ok(dialog >= 0 && post < dialog, 'rack closed before the hand tool is fitted');
+    assert.ok(ls.indexOf('G53 G0 X500 Y500', post) < dialog, 'back at the manual station before the dialog');
+  });
+
+  test('on: hand tool to rack tool opens the rack only after the hand tool is out', () => {
+    const ls = lines(cfg(true), HAND, 2);
+    once(ls);
+    const out = ls.indexOf('M61 Q0');
+    const pre = ls.indexOf(PRE), post = ls.indexOf(POST);
+    assert.ok(out >= 0 && pre > out, 'rack opened after the hand tool is removed');
+    assert.ok(pre < ls.indexOf('M61 Q2'), 'rack opened before the rack tool is loaded');
+    assert.ok(post > ls.indexOf('M61 Q2'), 'rack closed after the rack tool is loaded');
+  });
+
+  test('on: a change between rack tools and the empty spindle is untouched', () => {
+    for (const [from, to] of [[1, 2], [0, 3], [3, 0]]) {
+      assert.deepEqual(lines(cfg(true), from, to), lines(cfg(false), from, to));
+    }
+  });
+});

@@ -1717,6 +1717,17 @@
 
       <div class="pa-panel pa-panel-events">
         <div class="pa-card pa-events-card">
+          <h3 class="pa-card-title">Rack and Manual Only</h3>
+          <p class="pa-card-help">Runs the Pre and Post Tool Change events only around the rack part of a change, so a rack they open is closed whenever the probe or a manual tool is picked up or put down. Probe or manual tool with an empty spindle, or one swapped for the other: neither event runs. Rack tool to probe or manual tool: Pre runs at the start, Post runs as soon as the spindle has left the rack, before the probe pickup or the manual dialog. Probe or manual tool to rack tool: Pre runs only after the probe is back in its holder or the manual tool is out, Post at the end as usual. Changes between rack tools are not affected.</p>
+          <div class="pa-field-inline">
+            <label for="pa-events-rack-only">Keep the rack closed for the probe and manual tools</label>
+            <label class="pa-toggle">
+              <input type="checkbox" id="pa-events-rack-only">
+              <span class="pa-toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="pa-card pa-events-card">
           <h3 class="pa-card-title">Pre Tool Change</h3>
           <p class="pa-card-help">G-code commands executed before each tool change (M6). E.g. turn off coolant, open ATC cover. Runs in the units the program is using (<code>G20</code>/<code>G21</code>), not always millimetres — so put an explicit <code>G20</code> or <code>G21</code> in the snippet if it contains coordinates. Units and distance mode are restored afterwards, so anything modal you set here cannot leak into the rest of the job.</p>
           <div id="pa-pre-editor" class="pa-monaco"></div>
@@ -3163,6 +3174,7 @@
 
     var probe = initialConfig.probe || {};
     $('pa-probe-enabled').checked = !!probe.enabled;
+    if ($('pa-events-rack-only')) $('pa-events-rack-only').checked = !!initialConfig.eventsRackOnly;
     $('pa-probe-holding').value = probe.holding || 'Fork';
     if (segProbeSlideAxis) segProbeSlideAxis.set(probe.slideAxis || 'X');
     if (segProbeSlideDir)  segProbeSlideDir.set(probe.slideDirection || 'Negative');
@@ -3445,6 +3457,7 @@
       },
 
       showMacroCommand: $('pa-show-macro-command').checked,
+      eventsRackOnly: !!($('pa-events-rack-only') && $('pa-events-rack-only').checked),
       preToolChangeGcode: preEditor ? preEditor.getValue() : (initialConfig.preToolChangeGcode || ''),
       postToolChangeGcode: postEditor ? postEditor.getValue() : (initialConfig.postToolChangeGcode || ''),
       preTlsGcode: preTlsEditor ? preTlsEditor.getValue() : (initialConfig.preTlsGcode || ''),

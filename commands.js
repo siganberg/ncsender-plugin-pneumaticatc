@@ -284,6 +284,9 @@ const buildInitialConfig = (raw = {}) => {
     seekDistance: toFiniteNumber(raw.seekDistance, 50),
     seekFeedrate: toFiniteNumber(raw.seekFeedrate, 500),
 
+    // Pre/Post Tool Change only around the rack part of a change, never
+    // around a probe or hand-tool part (see rackEvents).
+    eventsRackOnly: !!raw.eventsRackOnly,
     preToolChangeGcode: raw.preToolChangeGcode ?? '',
     postToolChangeGcode: raw.postToolChangeGcode ?? '',
     abortEventGcode: raw.abortEventGcode ?? '',
@@ -853,6 +856,22 @@ function postToolChangeThenLeg(postCmd, leg, settings) {
     G21
     G53 G0 Z${settings.zSafe}
     ${leg.trim()}`;
+}
+
+// A Pre/Post Tool Change event run in the middle of a change instead of at
+// either end (see rackEvents in buildToolChangeProgram). Same treatment as
+// at the ends: the snippet in the program's units, then back to millimetres
+// and safe Z — and back over `at`, the XY the sequence carries on from, in
+// case the snippet moved the spindle.
+function midChangeEvent(snippet, tag, at, settings) {
+  if (!snippet) return '';
+  return `G53 G0 Z${settings.zSafe}
+    G4 P0
+    G[#<return_units>]
+    ${modalSafe(snippet, tag)}
+    G21
+    G53 G0 Z${settings.zSafe}
+    G53 G0 X${at.x} Y${at.y}`;
 }
 
 function createToolLengthSetProgram(settings, toolOffsets = { x: 0, y: 0, z: 0 }, options = {}) {
@@ -2101,6 +2120,39 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     ? ((verifyRuns || holder.cup) ? holder.engaged : holder.approach)
     : null;
   const holderUnloadRestXY = holder ? holder.engaged : null;
+  // Pre/Post Tool Change usually open and close a rack. With eventsRackOnly
+  // on, they only ever wrap the rack part of a change, so the rack is closed
+  // whenever the probe or a hand-loaded tool is picked up or put down
+  // ("off-rack" below is either of the two):
+  //   off-rack <-> empty spindle / off-rack   neither event runs
+  //   rack tool -> off-rack   Pre at the start as usual; Post once the
+  //                           spindle has left the rack and is over the probe
+  //                           holder / at the manual station, before the
+  //                           pickup or the operator dialog
+  //   off-rack -> rack tool   Pre once the probe is back in its holder / the
+  //                           hand tool is out, before the spindle heads for
+  //                           the rack; Post as usual
+  // A change between rack tools and the empty spindle is untouched.
+  const isRackTool = (n) => n > 0 && n <= settings.slots;
+  const isOffRack = (n) => n > 0 && !isRackTool(n);
+  const userPreCmd = settings.preToolChangeGcode?.trim() || '';
+  const userPostCmd = settings.postToolChangeGcode?.trim() || '';
+  const rackEvents = (() => {
+    const whole = { pre: userPreCmd, post: userPostCmd, midPre: '', midPost: '' };
+    if (!settings.eventsRackOnly) return whole;
+    if (!isOffRack(currentTool) && !isOffRack(toolNumber)) return whole;
+    if (isRackTool(currentTool)) {
+      const at = targetIsProbe ? holder.approach : settings.manualTool;
+      return { pre: userPreCmd, post: '', midPre: '',
+        midPost: midChangeEvent(userPostCmd, 'post', at, settings) };
+    }
+    if (isRackTool(toolNumber)) {
+      const at = sourceIsProbe ? holderUnloadRestXY : settings.manualTool;
+      return { pre: '', post: userPostCmd, midPost: '',
+        midPre: midChangeEvent(userPreCmd, 'pre', at, settings) };
+    }
+    return { pre: '', post: '', midPre: '', midPost: '' };
+  })();
   // Probing decision:
   //   'always'  — probe on every M6.
   //   'library' — probe only when the tool has no TLO stored yet
@@ -2244,7 +2296,10 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
           ? cupExit(sourceSlot.engaged, holder.approach, settings)
           : rackExit(sourceSlot.engaged, holder.approach, settings))
       : probeRoute(fromXY, holder.approach, settings);
-    loadSection = buildProbeLoad(settings, entrance, tlsRoutine, drawbarAlreadyReleased);
+    // rack tool -> probe with eventsRackOnly: the rack is closed here, with
+    // the spindle clear of it and over the holder, still at safe Z.
+    const entranceThenPost = rackEvents.midPost ? `${entrance}\n    ${rackEvents.midPost}` : entrance;
+    loadSection = buildProbeLoad(settings, entranceThenPost, tlsRoutine, drawbarAlreadyReleased);
   } else {
     // Rack unload → manual load: leave the rack the way a rack exit does.
     const manualEntrance = targetIsManual && chainedFromRack
@@ -2252,7 +2307,12 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
           ? cupExit(sourceSlot.engaged, settings.manualTool, settings)
           : rackExit(sourceSlot.engaged, settings.manualTool, settings))
       : undefined;
-    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo, manualEntrance);
+    // rack tool -> hand tool with eventsRackOnly: the rack is closed once the
+    // spindle is at the manual station, before the operator dialog.
+    const manualEntranceThenPost = manualEntrance && rackEvents.midPost
+      ? `${manualEntrance}\n    ${rackEvents.midPost}`
+      : manualEntrance;
+    loadSection = buildLoadTool(settings, toolNumber, targetSlot, tlsRoutine, drawbarAlreadyReleased, loadFrom, chainedFromRack, returnTo, manualEntranceThenPost);
   }
 
   // Tx → T0 leaves the drawbar released after the unload (there is no
@@ -2299,8 +2359,9 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
   // destination in this program the plugin cannot vouch for.
   exitSection = handFinalLegToCoreCheck(exitSection);
 
-  const preCmd = settings.preToolChangeGcode?.trim() || '';
-  const postCmd = settings.postToolChangeGcode?.trim() || '';
+  // Which events run at the two ends of this change (see rackEvents).
+  const preCmd = rackEvents.pre;
+  const postCmd = rackEvents.post;
   // Post Tool Change goes in front of the final leg (see splitFinalLeg).
   const exitSplit = splitFinalLeg(exitSection);
   let postAtEnd = !!postCmd;
@@ -2381,6 +2442,7 @@ function buildToolChangeProgram(settings, currentTool, toolNumber, toolOffsets =
     G53 G0 Z${settings.zSafe}
     ${zeroKeepSection}
     ${unloadSection}
+    ${rackEvents.midPre}
     ${swapBody}
     G4 P0
     ${sienciKeepout(settings).on}
