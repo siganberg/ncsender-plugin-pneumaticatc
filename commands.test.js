@@ -3808,6 +3808,50 @@ describe('routing stays inside the machine travel', () => {
     }
   });
 
+  // An update must protect without the settings being saved again: the
+  // travel is read from the controller at every command, and its direction
+  // from where the rack, the tool setter and the spindle are.
+  describe('with settings never saved since the update', () => {
+    const run = (firmware, tool, command, overrides = {}, mpos = ABOVE_SLOT) => {
+      const settings = cfg({ machineLimits: undefined, ...overrides });
+      const before = globalThis.pluginContext;
+      globalThis.pluginContext = { getFirmwareSetting: (k) => (k in firmware ? firmware[k] : null) };
+      try {
+        const commands = [{ command, isOriginal: true }];
+        onBeforeCommand(commands, { machineState: { tool, mpos }, tools: [] }, settings);
+        return { ls: text(commands), limits: settings.machineLimits };
+      } finally { globalThis.pluginContext = before; }
+    };
+    const FW = { 130: 1213.499, 131: 810.531 };
+
+    test('the reported M6 stays on the bed', () => {
+      const { ls, limits } = run(FW, 1, 'M6 T2');
+      assert.deepEqual(limits, LIMITS);
+      assert.ok(ls.length > 20, 'the tool change was expanded');
+      assert.deepEqual(offBed(ls), []);
+    });
+
+    test('a machine that runs in negative coordinates is read the other way round', () => {
+      const neg = { slot1: { x: -37.498, y: -359.497, z: -57.5 }, toolsetter: { x: -74.492, y: -736.999 } };
+      const { ls, limits } = run(FW, 1, 'M6 T2', neg, { x: -37.498, y: -359.497 });
+      assert.deepEqual(limits, { minX: -1213.499, maxX: 0, minY: -810.531, maxY: 0 });
+      assert.deepEqual(offBed(ls, limits), []);
+    });
+
+    test('an axis whose direction cannot be told is left unlimited', () => {
+      const { limits } = run(FW, 1, 'M6 T2', { toolsetter: { x: -74.492, y: -736.999 } });
+      assert.equal(limits.minX, -Infinity);
+      assert.equal(limits.maxX, Infinity);
+      assert.equal(limits.minY, -810.531);
+    });
+
+    test('no travel from the controller: the saved limits are kept', () => {
+      const { limits } = run({}, 1, 'M6 T2', { machineLimits: LIMITS });
+      assert.deepEqual(limits, LIMITS);
+      assert.equal(run({}, 1, 'M6 T2').limits, null);
+    });
+  });
+
   test('an end of the rack that is off the bed is not used as the corner', () => {
     // Rack along Y with its low-Y end 20 mm from the Y limit: the corner
     // detour must go round the other end.

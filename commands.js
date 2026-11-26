@@ -1203,6 +1203,47 @@ function pickEntryEdge(settings, edgeAnchor, freeEdge = false) {
   return slidingSidePerp(settings);
 }
 
+// The machine's travel as it is right now, worked out at every command so a
+// plugin update takes effect without the settings being saved again.
+//
+// The size comes from the controller ($130 / $131, read from ncSender's
+// cache). Which way it runs from machine zero comes from where the machine
+// demonstrably is: the rack, the tool setter and the spindle are all on the
+// bed, so their sign is the bed's sign. An axis whose points are all at zero,
+// or disagree, stays unlimited. Null when the controller's travel can't be
+// read: the limits saved by the settings page are then used, if any.
+function liveMachineLimits(settings, context) {
+  const host = typeof pluginContext !== 'undefined' ? pluginContext : null;
+  if (!host || typeof host.getFirmwareSetting !== 'function') return null;
+  let tx, ty;
+  try {
+    tx = Number(host.getFirmwareSetting('130'));
+    ty = Number(host.getFirmwareSetting('131'));
+  } catch (_) { return null; }
+  if (!(tx > 0) || !(ty > 0)) return null;
+
+  const points = [];
+  if (settings.layoutMode === 'custom') {
+    for (const c of sanitizeSlotCoords(settings.slotCoords, settings.slots).values()) points.push(c);
+  } else if (settings.slot1) {
+    points.push(settings.slot1);
+  }
+  if (settings.toolsetter) points.push(settings.toolsetter);
+  const mpos = context && context.machineState && context.machineState.mpos;
+  if (mpos) points.push(mpos);
+
+  const range = (axis, travel) => {
+    const values = points.map((pt) => Number(pt && pt[axis])).filter(Number.isFinite);
+    const plus = values.some((v) => v > 1);
+    const minus = values.some((v) => v < -1);
+    if (plus === minus) return [-Infinity, Infinity];
+    return plus ? [0, travel] : [-travel, 0];
+  };
+  const [minX, maxX] = range('x', tx);
+  const [minY, maxY] = range('y', ty);
+  return { minX, maxX, minY, maxY };
+}
+
 // Whether a coordinate along the rack's perp or par axis is inside the
 // machine's travel. True when the travel isn't known (settings saved by an
 // older version): routing then behaves as it always did.
@@ -3157,6 +3198,7 @@ function onBeforeCommand(commands, context, settings) {
   if (context && context.safeZHeight !== undefined) {
     settings.zSafe = context.safeZHeight;
   }
+  settings.machineLimits = liveMachineLimits(settings, context) || settings.machineLimits || null;
   requireOutputDevice(commands, settings);
   gateSpindleUnclamp(commands, context, settings);
   handleTLSCommand(commands, context, settings);
