@@ -1,5 +1,4 @@
 ## What's Changed
 
 ### 🐛 Bug Fixes
-- Tool change routes now stay inside your machine's travel limits
-- Pressing Retry after a missing tool now runs the tool pickup again
+- The routing fix now takes effect automatically because machine travel is read live, so you no longer need to re-save your settings for it to apply
