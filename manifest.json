@@ -71,6 +71,16 @@
       "message": "The tool sensor still does not detect a tool in the spindle after two retries.<br><br>Click <em>\"Abort\"</em> to stop the tool change, then inspect the slot and the spindle taper.<br><br>To run without this check, turn the sensor off in the Pneumatic ATC settings. The tool change is then no longer checked here.",
       "continueLabel": ""
     },
+    "TOOL_NOT_PICKED_UP": {
+      "title": "No Tool Picked Up",
+      "message": "The drawbar closed, but the tool sensor does not detect {toolNumber} in the spindle. The spindle has moved up, clear of the slot.<br><br>If the slot was empty, put the tool in it and click <em>\"Retry\"</em>: the pickup runs again.<br><br>If a tool <strong>is</strong> in the spindle, the sensor is misreading. Click <em>\"Abort\"</em> and check the sensor: Retry opens the drawbar above the slot.",
+      "continueLabel": "Retry"
+    },
+    "TOOL_NOT_PICKED_UP_FINAL": {
+      "title": "Tool Still Not Detected",
+      "message": "The tool sensor still does not detect {toolNumber} in the spindle after two more pickups.<br><br>Click <em>\"Abort\"</em> to stop the tool change, then inspect the slot, the pull stud and the sensor.<br><br>To run without this check, turn the sensor off in the Pneumatic ATC settings.",
+      "continueLabel": ""
+    },
     "TOOL_STILL_GRIPPED": {
       "title": "Tool Did Not Release",
       "message": "The spindle lifted away from the slot but the tool sensor still detects a tool, so the tool did not stay behind in the rack.<br><br>Check that the holder dropped cleanly into the slot and is not hung up on the cup or fork, and that the drawbar is fully open.<br><br>Click <em>\"Retry\"</em> to re-check the tool sensor, or <em>\"Abort\"</em> to stop the tool change.",

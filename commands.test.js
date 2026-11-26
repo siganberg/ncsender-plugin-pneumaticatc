@@ -2288,7 +2288,7 @@ describe('sensor guards — drawbar and tool-in-spindle', () => {
     assert.ok(slideOut > tisRead,
       `the fork slide-out must come after both checks — got slideOut=${slideOut}, tisRead=${tisRead}`);
     assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_CLOSE)'));
-    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT)'));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_NOT_PICKED_UP_2)'));
   });
 
   test('load from empty also verifies the release before descending onto the shank', () => {
@@ -2994,7 +2994,8 @@ describe('Abort at a drawbar or tool-sensor prompt returns to origin', () => {
 
   test('the offer precedes the message, the block follows the M0', () => {
     const lines = program({ ...bridge, rackHolding: 'Cup' });
-    const msg = lines.indexOf('(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT)');
+    const msg = lines.indexOf('(MSG, PLUGIN_PNEUMATICATC:TOOL_NOT_PICKED_UP_1)');
+    assert.ok(msg > 0);
     assert.equal(lines[msg - 1], '(GATE_ABORT_OFFERED)');
     assert.equal(lines[msg + 1], 'M0');
     assert.equal(lines[msg + 2], '(GATE_ABORT)');
@@ -3347,16 +3348,101 @@ describe('sensor checks — retry, then abort only', () => {
     }
   });
 
-  test('drawbar closed: Retry clamps again; tool checks: Retry only re-reads', () => {
+  test('drawbar closed: Retry clamps again', () => {
     const s = cfg(bridge);
     const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
     const closed = elseBlocks(ls, '(DONGLE_WAIT:xio:in0=0:0:1:else)').map(outside);
     assert.equal(closed.length, 3);
     assert.equal(closed[0][0], '(MSG, PLUGIN_PNEUMATICATC:DRAWBAR_FAILED_TO_CLOSE)', 'nothing to undo first');
     assert.deepEqual(closed[0].slice(closed[0].indexOf('M0') + 1), ['G4 P0', '(DONGLE:xio:out 0 0)', 'G4 P0.5']);
-    const present = elseBlocks(ls, '(DONGLE_WAIT:xio:in1=1:0:0.5:else)').map(outside);
-    assert.deepEqual(present[0], ['(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT)', 'M0', 'G4 P0.5']);
-    assert.deepEqual(present[2], ['(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT_FINAL)', 'M0']);
+  });
+
+  // A tool missing from its slot is the usual reason for "no tool": the
+  // operator forgot to put it in. Retry used to only read the sensor again,
+  // which can never pass on an empty slot.
+  for (const rackHolding of ['Fork', 'Cup']) {
+    test(`${rackHolding}: no tool picked up: the spindle clears the slot, then Retry runs the pickup again`, () => {
+      const s = cfg({ ...bridge, rackHolding });
+      const slot = calculateSlotPosition(s, 2);
+      const ls = lines(buildLoadTool(s, 2, slot, '', false, { x: 0, y: 0 }, false));
+      const blocks = elseBlocks(ls, '(DONGLE_WAIT:xio:in1=1:0:0.5:else)').map(outside);
+      assert.equal(blocks.length, 3, 'two retries, then abort only');
+      const engaged = `G53 G0 X${slot.engaged.x} Y${slot.engaged.y}`;
+      for (const [i, b] of blocks.entries()) {
+        const last = i === 2;
+        const msg = b.indexOf(`(MSG, PLUGIN_PNEUMATICATC:TOOL_NOT_PICKED_UP${last ? '_FINAL' : ''}_2)`);
+        assert.ok(msg > 0, `block ${i}: its prompt`);
+        const before = b.slice(0, msg);
+        const after = b.slice(b.indexOf('M0') + 1);
+        // Before asking: up to safe Z, a fork sideways first; the drawbar is not touched.
+        assert.equal(before[before.length - 1], 'G53 G0 Z0', `block ${i}: at safe Z before the prompt`);
+        if (rackHolding === 'Fork')
+          assert.match(before[0], new RegExp(`^G53 G1 X${slot.approach.x} Y${slot.approach.y} F\\d+$`), 'fork: slides out first');
+        else assert.deepEqual(before, ['G53 G0 Z0'], 'cup: straight up');
+        assert.ok(!before.some((l) => /DONGLE:xio:out/.test(l)), `block ${i}: clears the slot without switching the drawbar`);
+        if (last) {
+          assert.deepEqual(after, [], 'nothing to retry after the last prompt');
+          continue;
+        }
+        // Retry: over the slot, release, down, clamp.
+        assert.equal(after[0], engaged, 'back over the slot');
+        const release = after.indexOf('(DONGLE:xio:out 0 1)');
+        const clamp = after.indexOf('(DONGLE:xio:out 0 0)');
+        const down = after.findIndex((l) => /^G53 G[01] Z-/.test(l));
+        assert.ok(release > 0 && down > release && clamp > down, `release, descend, clamp: ${after.join(' | ')}`);
+        assert.ok(/^G4 P/.test(after[after.length - 1]), 'settles before the sensor is read again');
+        assert.ok(!after.some((l) => /^M61/.test(l)), 'the tool is not declared loaded by the retry');
+      }
+      // After the checks the load carries on as it always did.
+      const tail = ls.slice(ls.lastIndexOf('(DONGLE_END)') + 1);
+      assert.ok(tail.includes('M61 Q2'));
+      assert.equal(tail.filter((l) => l === 'G53 G0 Z0').length, 1);
+    });
+  }
+
+  test('taper blow: the repeated pickup opens the drawbar just above the holder, like the first one', () => {
+    const s = cfg({ ...bridge, taperBlow: true, rackHolding: 'Cup' });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const retry = elseBlocks(ls, '(DONGLE_WAIT:xio:in1=1:0:0.5:else)').map(outside)[0];
+    const after = retry.slice(retry.indexOf('M0') + 1);
+    const above = after.indexOf('G53 G0 Z-80');   // slot Z -100 + 20
+    assert.ok(above > 0 && after.indexOf('(DONGLE:xio:out 0 1)') > above, 'released 20 mm above the holder, not at safe Z');
+  });
+
+  test('wired clamp and wired sensor: the same pickup, inside the o-word blocks', () => {
+    const s = cfg({ clampAuxOutput: 1, drawbarInput: 3, toolSensorInput: 5, rackHolding: 'Cup' });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    const first = ls.slice(ls.indexOf('o2120 if [#5399 EQ -1]'), ls.indexOf('o2120 endif'));
+    assert.ok(first.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_NOT_PICKED_UP_2)'));
+    const after = first.slice(first.indexOf('(GATE_END)') >= 0 ? first.indexOf('(GATE_END)') + 1 : first.indexOf('M0') + 1);
+    assert.ok(after.indexOf('M64 P1') >= 0 && after.indexOf('M65 P1') > after.indexOf('M64 P1'), 'release then clamp');
+    assert.equal(after[after.length - 1], 'M66 P5 L4 Q0.5', 're-reads the sensor inside the block');
+    const fin = ls.slice(ls.indexOf('o2122 if [#5399 EQ -1]'), ls.indexOf('o2122 endif'));
+    assert.ok(fin.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_NOT_PICKED_UP_FINAL_2)'));
+    assert.ok(!fin.includes('M64 P1'), 'the last prompt never releases');
+  });
+
+  // ncSender sends a Wireless I/O line even from an o-word branch the
+  // controller skips. With a wired sensor the pickup would sit in such a
+  // branch, and its release would open the drawbar on a tool gripped fine.
+  test('Wireless I/O clamp with a wired tool sensor keeps the plain re-read', () => {
+    const s = cfg({ clampAuxOutput: 'bridge:0', toolSensorInput: 5, rackHolding: 'Cup' });
+    const ls = lines(buildLoadTool(s, 2, calculateSlotPosition(s, 2), '', false, { x: 0, y: 0 }, false));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_FAILED_TO_SEAT)'));
+    assert.ok(!ls.some((l) => /TOOL_NOT_PICKED_UP/.test(l)));
+    let depth = 0;
+    for (const l of ls) {
+      if (/^o\d+ endif/i.test(l)) depth -= 1;
+      if (depth > 0) assert.ok(!/DONGLE:xio:out/.test(l), `no drawbar switch inside an o-word branch: ${l}`);
+      if (/^o\d+ if /i.test(l)) depth += 1;
+    }
+  });
+
+  test('the probe holder and the unload keep their re-read', () => {
+    const s = cfg(bridge);
+    const ls = lines(buildUnloadTool(s, 1, calculateSlotPosition(s, 1), { x: 0, y: 0 }));
+    assert.ok(ls.includes('(MSG, PLUGIN_PNEUMATICATC:TOOL_STILL_GRIPPED)'));
+    assert.ok(!ls.some((l) => /TOOL_NOT_PICKED_UP/.test(l)));
   });
 
   test('wired: each retry re-reads inside its own block', () => {
@@ -3377,7 +3463,7 @@ describe('sensor checks — retry, then abort only', () => {
   test('the manifest offers Retry, and the last prompt Abort only', async () => {
     const { readFileSync } = await import('node:fs');
     const m = JSON.parse(readFileSync(new URL('./manifest.json', import.meta.url))).messages;
-    for (const id of ['DRAWBAR_FAILED_TO_OPEN', 'DRAWBAR_FAILED_TO_CLOSE', 'TOOL_FAILED_TO_SEAT', 'TOOL_STILL_GRIPPED']) {
+    for (const id of ['DRAWBAR_FAILED_TO_OPEN', 'DRAWBAR_FAILED_TO_CLOSE', 'TOOL_FAILED_TO_SEAT', 'TOOL_STILL_GRIPPED', 'TOOL_NOT_PICKED_UP']) {
       assert.equal(m[id].continueLabel, 'Retry', id);
       assert.equal(m[`${id}_FINAL`].continueLabel, '', `${id}_FINAL: no Continue`);
     }
@@ -3637,5 +3723,101 @@ describe('rack slider output', () => {
   test('the clamp output can never be the rack output', () => {
     assert.equal(buildInitialConfig({ clampAuxOutput: 'bridge:2', rackCoverOutput: 'bridge:2' }).rackCoverOutput, -1);
     assert.equal(buildInitialConfig({ clampAuxOutput: 1, rackCoverOutput: 1 }).rackCoverOutput, -1);
+  });
+});
+
+
+// === A rack closer to the end of travel than its keepout padding ===
+//
+// Reported setup (cup rack, Sienci, home back-left): slot at X37.5, padding
+// 60, so the box's low-X edge is at X-22.5, off the bed. With the spindle or
+// the tool setter in line with the rack the route picked that edge and the
+// first move of the change was `G53 G0 X-22.502` -> ALARM:2.
+describe('routing stays inside the machine travel', () => {
+  const LIMITS = { minX: 0, maxX: 1213.499, minY: -810.531, maxY: 0 };
+  const cfg = (extra = {}) => buildInitialConfig({
+    slots: 2, slot1: { x: 37.498, y: -359.497, z: -57.5 }, slotDistance: 60,
+    orientation: 'Y', direction: 'Positive', keepoutPadding: 60, rackHolding: 'Cup',
+    zSafe: -5, clampAuxOutput: 0, tlsMode: 'always',
+    toolsetter: { x: 74.492, y: -736.999 }, manualTool: { x: 600, y: -400 },
+    machineLimits: LIMITS,
+    ...extra,
+  });
+  const text = (r) => (Array.isArray(r) ? r.map((c) => (typeof c === 'string' ? c : (c && c.command) || '')) : [String(r)])
+    .join('\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  const moves = (ls) => ls.filter((l) => /G53/.test(l) && !l.startsWith('(')).map((l) => ({
+    l, x: /X(-?[\d.]+)/.exec(l), y: /Y(-?[\d.]+)/.exec(l),
+  }));
+  const offBed = (ls, lim = LIMITS) => moves(ls).filter(({ x, y }) =>
+    (x && (Number(x[1]) < lim.minX - 0.001 || Number(x[1]) > lim.maxX + 0.001))
+    || (y && (Number(y[1]) < lim.minY - 0.001 || Number(y[1]) > lim.maxY + 0.001))).map((m) => m.l);
+  const ABOVE_SLOT = { x: 37.498, y: -359.497 };
+
+  test('the reported change: from above the slot, nothing goes to a negative X', () => {
+    const ls = text(buildToolChangeProgram(cfg(), 1, 2, { x: 0, y: 0, z: 0 }, 0, ABOVE_SLOT));
+    assert.deepEqual(offBed(ls), []);
+    const loaded = text(buildToolChangeProgram(cfg(), 0, 2, { x: 0, y: 0, z: 0 }, 0, ABOVE_SLOT));
+    assert.deepEqual(offBed(loaded), []);
+    // It goes round the side the bed is on: the box's high-X edge.
+    assert.ok(loaded.includes('G53 G0 X97.498 Y-359.497'));
+  });
+
+  test('the reported standalone measurement stays on the bed too', () => {
+    const ls = text(createToolLengthSetProgram(cfg(), { x: 0, y: 0, z: 0 }, { originMPos: ABOVE_SLOT }));
+    assert.deepEqual(offBed(ls), []);
+  });
+
+  test('every change, from anywhere on the bed, stays inside the travel', () => {
+    const starts = [ABOVE_SLOT, { x: 0, y: 0 }, { x: 5, y: -359.497 }, { x: 74.492, y: -736.999 }, { x: 600, y: -300 }, { x: 60, y: -100 }, { x: 1200, y: -800 }];
+    for (const rackHolding of ['Cup']) for (const tlsMode of ['always', 'library']) for (const origin of starts) {
+      for (const [from, to] of [[0, 1], [0, 2], [1, 2], [2, 1], [1, 0], [2, 0], [0, 7], [7, 1], [1, 7]]) {
+        const ls = text(buildToolChangeProgram(cfg({ rackHolding, tlsMode }), from, to, { x: 0, y: 0, z: 0 }, tlsMode === 'library' ? -40 : 0, origin));
+        assert.deepEqual(offBed(ls), [], `${rackHolding}/${tlsMode} ${from}->${to} from ${origin.x},${origin.y}`);
+      }
+    }
+  });
+
+  test('the same rack on the far side of the bed uses the other edge', () => {
+    // Mirror: slot 37.5 mm from the X max limit; the high-X edge is off the bed.
+    // (slideDirection Positive makes the high-X edge the fallback, as low-X is for the reported rack.)
+    const s = cfg({ slot1: { x: 1176, y: -359.497, z: -57.5 }, toolsetter: { x: 1140, y: -736.999 }, slideDirection: 'Positive' });
+    assert.ok(offBed(text(buildToolChangeProgram({ ...s, machineLimits: null }, 0, 1, { x: 0, y: 0, z: 0 }, 0, { x: 1176, y: -359.497 }))).length > 0,
+      'this setup does leave the bed when the travel is unknown');
+    for (const origin of [{ x: 1176, y: -359.497 }, { x: 600, y: -300 }]) {
+      for (const [from, to] of [[0, 1], [1, 2], [2, 0]]) {
+        assert.deepEqual(offBed(text(buildToolChangeProgram(s, from, to, { x: 0, y: 0, z: 0 }, 0, origin))), [], `${from}->${to}`);
+      }
+    }
+  });
+
+  test('settings saved before the travel was stored route as they always did', () => {
+    const old = text(buildToolChangeProgram(cfg({ machineLimits: undefined }), 0, 2, { x: 0, y: 0, z: 0 }, 0, ABOVE_SLOT));
+    assert.ok(old.includes('G53 G0 X-22.502 Y-359.497'), 'unchanged without limits');
+    assert.equal(buildInitialConfig({}).machineLimits, null);
+    assert.equal(buildInitialConfig({ machineLimits: { minX: 0, maxX: 0, minY: 0, maxY: 1 } }).machineLimits, null, 'nonsense limits are dropped');
+  });
+
+  test('a rack with room on both sides is routed exactly as before', () => {
+    const roomy = { slot1: { x: 400, y: -359.497, z: -57.5 }, toolsetter: { x: 430, y: -736.999 } };
+    for (const origin of [{ x: 400, y: -359.497 }, { x: 0, y: 0 }, { x: 900, y: -300 }]) {
+      for (const [from, to] of [[0, 1], [1, 2], [2, 0]]) {
+        const withLimits = text(buildToolChangeProgram(cfg(roomy), from, to, { x: 0, y: 0, z: 0 }, 0, origin));
+        const without = text(buildToolChangeProgram(cfg({ ...roomy, machineLimits: undefined }), from, to, { x: 0, y: 0, z: 0 }, 0, origin));
+        assert.deepEqual(withLimits, without, `${from}->${to} from ${origin.x},${origin.y}`);
+      }
+    }
+  });
+
+  test('an end of the rack that is off the bed is not used as the corner', () => {
+    // Rack along Y with its low-Y end 20 mm from the Y limit: the corner
+    // detour must go round the other end.
+    const s = cfg({ slot1: { x: 400, y: -790, z: -57.5 }, direction: 'Positive', slots: 3, rackHolding: 'Fork', slideDirection: 'Negative' });
+    // Both points sit near the low-Y end, so that end is the shorter way round.
+    const from = { x: 200, y: -800 }, to = { x: 520, y: -800 };
+    const unknown = routePoint(from, to, { ...s, machineLimits: null }, {});
+    assert.ok(unknown.some((p) => p.y < LIMITS.minY), 'the shorter corner is the one off the bed');
+    const way = routePoint(from, to, s, {});
+    assert.ok(way.length > 1, 'a detour is needed');
+    for (const p of way) assert.ok(p.y >= LIMITS.minY - 0.001, `corner at Y${p.y} is off the bed`);
   });
 });

@@ -195,6 +195,13 @@ const sanitizeCoords3D = (coords = {}) => ({
   z: toFiniteNumber(coords.z)
 });
 
+const sanitizeMachineLimits = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = ['minX', 'maxX', 'minY', 'maxY'].map((k) => Number(raw[k]));
+  if (!v.every(Number.isFinite) || !(v[0] < v[1]) || !(v[2] < v[3])) return null;
+  return { minX: v[0], maxX: v[1], minY: v[2], maxY: v[3] };
+};
+
 const sanitizeAuxOutput = (value) => {
   if (value === 'M7' || value === 'M8') return value;
   if (OUTPUT_PROVIDERS.some((p) => p.match(value) && typeof value === 'string')) return value;
@@ -326,6 +333,10 @@ const buildInitialConfig = (raw = {}) => {
     // Spindle stopped this long before the pump switches off (the choices the
     // Advanced tab offers; 30 s is for testing).
     waterPumpIdleSec: [30, 300, 600, 900, 1200].includes(Number(raw.waterPumpIdleSec)) ? Number(raw.waterPumpIdleSec) : 600,
+    // The machine's travel in machine coordinates, saved by the settings page
+    // (from $130/$131 and the home corner). Routing never picks a way around
+    // the rack that lies outside it. null = unknown: routing as before.
+    machineLimits: sanitizeMachineLimits(raw.machineLimits),
     // Output that opens a rack slider or cover (-1 = none; on = open). Never
     // the clamp or pump output. See rackCover.
     rackCoverOutput: (() => {
@@ -1180,10 +1191,29 @@ function pickEntryEdge(settings, edgeAnchor, freeEdge = false) {
       if (anchorPerp >= perpMax) return perpMax;
       if (anchorPerp <= perpMin) return perpMin;
     }
-    return settings.slideDirection === 'Positive' ? perpMax : perpMin;
+    // The anchor is in line with the rack, so it says nothing about the
+    // side. A rack mounted closer to the end of travel than its padding has
+    // one edge off the bed; never that one (a cup rack 37 mm from X0 with
+    // 60 mm padding sent the spindle to X-22.5: ALARM:2).
+    const pick = settings.slideDirection === 'Positive' ? perpMax : perpMin;
+    const other = pick === perpMax ? perpMin : perpMax;
+    return !onBed('perp', pick, settings) && onBed('perp', other, settings) ? other : pick;
   }
 
   return slidingSidePerp(settings);
+}
+
+// Whether a coordinate along the rack's perp or par axis is inside the
+// machine's travel. True when the travel isn't known (settings saved by an
+// older version): routing then behaves as it always did.
+function onBed(axis, value, settings) {
+  const lim = settings.machineLimits;
+  if (!lim) return true;
+  const orientationY = settings.orientation === 'Y';
+  const alongX = (axis === 'perp') === orientationY;
+  const lo = alongX ? lim.minX : lim.minY;
+  const hi = alongX ? lim.maxX : lim.maxY;
+  return value >= lo - 0.001 && value <= hi + 0.001;
 }
 
 // Route from `from` to `to` avoiding the padded keepout box.
@@ -1266,7 +1296,11 @@ function routePoint(from, to, settings, options = {}) {
   // harmless when only one does.
   const parViaMin = Math.abs(fromPar - parMin) + Math.abs(toPar - parMin);
   const parViaMax = Math.abs(fromPar - parMax) + Math.abs(toPar - parMax);
-  const sharedCornerPar = parViaMin <= parViaMax ? parMin : parMax;
+  const shortestPar = parViaMin <= parViaMax ? parMin : parMax;
+  const otherPar = shortestPar === parMin ? parMax : parMin;
+  // Same rule as the perp edge: not around an end of the rack that is off the bed.
+  const sharedCornerPar = !onBed('par', shortestPar, settings) && onBed('par', otherPar, settings)
+    ? otherPar : shortestPar;
 
   const pushDedup = (list, point) => {
     const last = list[list.length - 1];
@@ -1613,7 +1647,7 @@ const SENSOR_RETRIES = 2;
 // `abort` (optional) is what Abort does instead of a bare soft reset:
 // ncSender resumes the M0, runs only these lines, then resets (see the host's
 // GateAbortBlock). Retry skips them.
-function sensorGuard(pin, oNum, waitSec, asserted, msgId, { recover = '', retry = '', abort = '' } = {}) {
+function sensorGuard(pin, oNum, waitSec, asserted, msgId, { recover = '', retry = '', abort = '', finalId = '' } = {}) {
   const abortLines = abort ? abort.trim() : '';
   const prompt = (code, last) => [
     recover,
@@ -1625,7 +1659,7 @@ function sensorGuard(pin, oNum, waitSec, asserted, msgId, { recover = '', retry 
   ].map((l) => l.trim()).filter(Boolean).join('\n      ');
   const blocks = [];
   for (let i = 0; i < SENSOR_RETRIES; i++) blocks.push(prompt(msgId, false));
-  blocks.push(prompt(`${msgId}_FINAL`, true));
+  blocks.push(prompt(finalId || `${msgId}_FINAL`, true));
   return inputFor(pin).chain({ oNum, waitSec, asserted, blocks });
 }
 
@@ -1667,6 +1701,29 @@ function toolGuard(settings, oNum, expect, { abort } = {}) {
     settings.toolSensorInput, oNum, TOOL_SENSE_WAIT_SEC, present,
     present ? 'TOOL_FAILED_TO_SEAT' : 'TOOL_STILL_GRIPPED',
     { retry: 'G4 P0.5', abort }
+  );
+}
+
+// No tool after a pickup from a rack slot. By far the usual cause is an
+// empty slot: the operator forgot to put the tool in. So the spindle first
+// moves up clear of the slot (`clear`), then asks; Retry runs the pickup
+// again (`pickup`: release, back down, clamp) and the sensor is read again.
+// After the last prompt only Abort is left.
+//
+// One setup keeps the plain re-read: a clamp valve on a Wireless I/O output
+// with a WIRED tool sensor. The wired check is an o-word `if`, and ncSender
+// sends a Wireless I/O line even from a branch the controller skips, so the
+// pickup's release would open the drawbar on a tool that was gripped fine.
+function pickupGuard(settings, oNum, toolNumber, { clear, pickup, abort } = {}) {
+  if (!auxInputConfigured(settings.toolSensorInput)) return '';
+  const hostSwitchedClamp = !!outputFor(settings.clampAuxOutput).device;
+  const wiredSensor = !inputFor(settings.toolSensorInput).device;
+  if (hostSwitchedClamp && wiredSensor) return toolGuard(settings, oNum, 'present', { abort });
+  const id = idOf(toolNumber);
+  return sensorGuard(
+    settings.toolSensorInput, oNum, TOOL_SENSE_WAIT_SEC, true,
+    `TOOL_NOT_PICKED_UP_${id}`,
+    { recover: clear, retry: pickup, abort, finalId: `TOOL_NOT_PICKED_UP_FINAL_${id}` }
   );
 }
 
@@ -1876,6 +1933,40 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       G53 G0 Z${approachZ}`;
   const clampSettle = settings.taperBlow ? DEDUST_CLAMP_SETTLE_SEC : 0.5;
 
+  // The pickup once more, for Retry after "no tool picked up" (pickupGuard).
+  // The spindle is clear of the slot at safe Z with the drawbar closed, so it
+  // always releases first, like a load from an empty spindle. No drawbar
+  // checks of its own: the tool sensor is read again right after.
+  const isCup = settings.rackHolding === 'Cup';
+  const againRelease = settings.taperBlow ? `
+      G53 G0 Z${settings.slot1.z + DEDUST_LIFT_MM}
+      G4 P0.1
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P${DEDUST_VENT_SEC}
+      G53 G1 Z${approachZ} F${DEDUST_FEEDRATE_MMPM}` : `
+      G4 P0.5
+      ${auxLineFor(settings, 'unclamp')}
+      G4 P0.5${isCup ? `
+      G53 G0 Z${cupSlowZ(settings.slot1.z)}
+      G53 G1 Z${approachZ} F${cupFeed(settings)}` : `
+      G53 G0 Z${approachZ}`}`;
+  const pickupAgain = `G53 G0 X${slotPos.engaged.x} Y${slotPos.engaged.y}${againRelease}
+      G4 P0.5
+      ${auxLineFor(settings, 'clamp')}${drawbarSeat}
+      G4 P${clampSettle}`;
+  // Up and clear of the slot so a tool can be put in. A fork is left the way
+  // a loaded spindle leaves it, sideways first: if the sensor misread and a
+  // tool IS gripped, lifting straight up would tear it through the fork.
+  const clearOfSlot = isCup
+    ? `G53 G0 Z${settings.zSafe}`
+    : `G53 G1 X${slotPos.approach.x} Y${slotPos.approach.y} F${slideFeedrate(settings)}
+      G53 G0 Z${settings.zSafe}`;
+  const pickedUp = pickupGuard(settings, 212, toolNumber, {
+    clear: clearOfSlot,
+    pickup: pickupAgain,
+    abort: rackAbortExit(settings, slotPos, abortTo, false),
+  });
+
   if (settings.rackHolding === 'Cup') {
     // Rapid to the slow zone, then feed to the approach height. The taper
     // blow path already feeds the last DEDUST_LIFT_MM.
@@ -1888,7 +1979,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
       ${auxLineFor(settings, 'clamp')}${drawbarSeat}
       G4 P${clampSettle}
       ${drawbarGuard(settings, 211, 'closed', { abort: rackAbortExit(settings, slotPos, abortTo, false) })}
-      ${toolGuard(settings, 212, 'present', { abort: rackAbortExit(settings, slotPos, abortTo, false) })}
+      ${pickedUp}
       G53 G0 Z${settings.zSafe}
       M61 Q${idOf(toolNumber)}
       ${tlsRoutine}
@@ -1902,7 +1993,7 @@ function buildLoadTool(settings, toolNumber, slotPos, tlsRoutine, drawbarAlready
     ${auxLineFor(settings, 'clamp')}${drawbarSeat}
     G4 P${clampSettle}
     ${drawbarGuard(settings, 211, 'closed', { abort: rackAbortExit(settings, slotPos, abortTo, false) })}
-    ${toolGuard(settings, 212, 'present', { abort: rackAbortExit(settings, slotPos, abortTo, false) })}
+    ${pickedUp}
     G53 G1 X${slotPos.approach.x} Y${slotPos.approach.y} F${feed}
     G53 G0 Z${settings.zSafe}
     M61 Q${idOf(toolNumber)}

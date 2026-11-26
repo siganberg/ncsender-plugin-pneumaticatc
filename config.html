@@ -3706,6 +3706,12 @@
 
   async function doSave() {
     var payload = gatherFormData();
+    // The machine's travel, for the routing: it never goes round the rack on
+    // a side that is off the bed. Kept as it was when it can't be read now
+    // (controller not connected).
+    var travel = await getMachineLimits();
+    payload.machineLimits = travel || initialConfig.machineLimits || null;
+    initialConfig.machineLimits = payload.machineLimits;
     if (payload.waterPumpOutput && payload.waterPumpOutput === String(payload.clampAuxOutput))
       throw new Error('the water pump and the clamp valve are on the same Wireless I/O output. Pick another pump output.');
     if (String(payload.rackCoverOutput) !== '-1'
