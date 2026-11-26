@@ -3174,6 +3174,70 @@ if (typeof pluginContext !== 'undefined' && pluginContext && typeof pluginContex
   pluginContext.setInterval(() => watchToolSensor(), SENSOR_POLL_MS);
 }
 
+// === What follows from the settings ===
+//
+// ncSender calls onSettingsApplied whenever these settings come into effect:
+// at startup, after an install or update, on enable, after Save, and when the
+// controller connects. Everything published from the settings is published
+// here, so an update takes effect without anyone opening the settings page
+// and pressing Save. (The page still does the same on Save, for an ncSender
+// from before this hook.) All of it is safe to repeat.
+
+// The rack's zone for the app's keepout: the padded box, cut off at the
+// machine's travel so it never covers area outside the bed. Null when there
+// is nothing to publish: no rack, or the travel isn't known yet (the page
+// has always clipped it, so an unclipped box would flip the saved zone back
+// and forth at every start until the controller connects).
+function keepoutZoneToPublish(settings, limits) {
+  if (!limits || !(settings.slots >= 1)) return null;
+  const box = computeKeepoutZone(settings);
+  const zone = {
+    name: 'ATC Zone',
+    minX: Math.max(box.minX, limits.minX),
+    minY: Math.max(box.minY, limits.minY),
+    maxX: Math.min(box.maxX, limits.maxX),
+    maxY: Math.min(box.maxY, limits.maxY),
+  };
+  const real = [zone.minX, zone.minY, zone.maxX, zone.maxY].every(Number.isFinite)
+    && zone.maxX > zone.minX && zone.maxY > zone.minY;
+  return real ? zone : null;
+}
+
+// What each Wireless I/O output is for. The bridge keeps the role itself;
+// it is also sent with every tool change, this makes it take effect now.
+function bridgeRoleLines(settings) {
+  const lines = [];
+  if (settings.waterPumpOutput) lines.push(`pumpidle ${settings.waterPumpIdleSec}`);
+  for (let n = 0; n < 4; n += 1) {
+    const output = `bridge:${n}`;
+    const role = String(settings.clampAuxOutput) === output ? 'drawbar'
+      : settings.waterPumpOutput === output ? 'pump' : 'none';
+    lines.push(`role ${n} ${role}`);
+  }
+  return lines;
+}
+
+function onSettingsApplied(settings) {
+  const host = typeof pluginContext !== 'undefined' ? pluginContext : null;
+  if (!host || !settings) return;
+
+  // Pro only: Community has no keepout, so no setKeepoutZones.
+  if (typeof host.setKeepoutZones === 'function') {
+    let limits = null;
+    try { limits = typeof host.getMachineLimits === 'function' ? host.getMachineLimits() : null; } catch (_) { limits = null; }
+    const zone = keepoutZoneToPublish(settings, limits || settings.machineLimits);
+    if (zone) host.setKeepoutZones([zone]);
+  }
+
+  const dongle = host.dongle;
+  if (dongle && typeof dongle.getDevices === 'function' && typeof dongle.send === 'function') {
+    const bridge = Array.from(dongle.getDevices() || []).find((d) => d && d.name === BRIDGE_DEVICE);
+    if (bridge && bridge.connected) {
+      for (const line of bridgeRoleLines(settings)) dongle.send(BRIDGE_DEVICE, line);
+    }
+  }
+}
+
 function onToolChangeStart(event, settings) {
   _toolChangeActive = true;
   closeToolAsk();
@@ -3210,7 +3274,7 @@ function onBeforeCommand(commands, context, settings) {
 }
 
 export {
-  onBeforeCommand, onToolChangeStart, onToolChangeEnd, buildInitialConfig, watchToolSensor, toolAskHtml, probeVerifyRoutine, probeVerifyGcode,
+  onBeforeCommand, onToolChangeStart, onToolChangeEnd, onSettingsApplied, keepoutZoneToPublish, bridgeRoleLines, buildInitialConfig, watchToolSensor, toolAskHtml, probeVerifyRoutine, probeVerifyGcode,
   rackEntrance, rackExit, cupEntrance, cupExit, tlsEntrance, tlsExit,
   computeKeepoutZone, slotEntryPoint, slotApproachPoint,
   buildLoadTool, buildUnloadTool, buildSlotNav, buildProbeNav, calculateSlotPosition,

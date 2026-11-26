@@ -17,7 +17,8 @@
   },
   "events": [
     "onBeforeCommand",
-    "onToolChangeEnd"
+    "onToolChangeEnd",
+    "onSettingsApplied"
   ],
   "permissions": [
     "gcode.modify"

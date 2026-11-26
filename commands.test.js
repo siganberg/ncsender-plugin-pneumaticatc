@@ -30,6 +30,9 @@ import {
   onToolChangeStart,
   watchToolSensor,
   onToolChangeEnd,
+  onSettingsApplied,
+  keepoutZoneToPublish,
+  bridgeRoleLines,
   buildInitialConfig,
   computeKeepoutZone,
   slotEntryPoint,
@@ -3863,5 +3866,93 @@ describe('routing stays inside the machine travel', () => {
     const way = routePoint(from, to, s, {});
     assert.ok(way.length > 1, 'a detour is needed');
     for (const p of way) assert.ok(p.y >= LIMITS.minY - 0.001, `corner at Y${p.y} is off the bed`);
+  });
+});
+
+
+// === Publishing from the settings without a Save ===
+//
+// The keepout zone and the Wireless I/O roles used to be sent by the settings
+// page when Save was pressed, so a plugin update that changed them did
+// nothing until the user opened the page and saved. ncSender now calls
+// onSettingsApplied at startup, after an update, on Save and on connect.
+describe('onSettingsApplied publishes what the settings page used to', () => {
+  const LIMITS = { minX: 0, maxX: 1213.499, minY: -810.531, maxY: 0 };
+  // The reported rack: two cups 37.5 mm from the left limit.
+  const cfg = (extra = {}) => buildInitialConfig({
+    slots: 2, slot1: { x: 37.498, y: -359.497, z: -57.5 }, slotDistance: 60,
+    orientation: 'Y', direction: 'Positive', keepoutPadding: 60, rackHolding: 'Cup',
+    clampAuxOutput: 0, ...extra,
+  });
+  const host = (overrides = {}) => {
+    const calls = { zones: [], sent: [] };
+    const ctx = {
+      getMachineLimits: () => LIMITS,
+      setKeepoutZones: (z) => { calls.zones.push(z); return true; },
+      dongle: { getDevices: () => [], send: (device, line) => calls.sent.push(`${device} ${line}`) },
+      ...overrides,
+    };
+    return { ctx, calls };
+  };
+  const run = (settings, ctx) => {
+    const before = globalThis.pluginContext;
+    globalThis.pluginContext = ctx;
+    try { onSettingsApplied(settings, { reason: 'load' }); } finally { globalThis.pluginContext = before; }
+  };
+
+  test('the rack zone is published, cut off at the machine travel', () => {
+    const { ctx, calls } = host();
+    run(cfg(), ctx);
+    // The same rectangle the settings page sent for this rack (from the user's log).
+    assert.deepEqual(calls.zones, [[{ name: 'ATC Zone', minX: 0, minY: -419.497, maxX: 97.498, maxY: -239.497 }]]);
+  });
+
+  test('a custom layout publishes the box around its own slots', () => {
+    const { ctx, calls } = host();
+    run(cfg({ layoutMode: 'custom', slotCoords: [{ n: 1, x: 300, y: -100 }, { n: 2, x: 420, y: -160 }] }), ctx);
+    assert.deepEqual(calls.zones[0][0], { name: 'ATC Zone', minX: 240, minY: -220, maxX: 480, maxY: -40 });
+  });
+
+  test('nothing is published while the travel is unknown, unless the page saved it', () => {
+    const unknown = host({ getMachineLimits: () => null });
+    run(cfg(), unknown.ctx);
+    assert.deepEqual(unknown.calls.zones, [], 'an unclipped box would flip the saved zone at every start');
+
+    const saved = host({ getMachineLimits: () => null });
+    run(cfg({ machineLimits: LIMITS }), saved.ctx);
+    assert.equal(saved.calls.zones.length, 1);
+    assert.equal(saved.calls.zones[0][0].minX, 0);
+  });
+
+  test('a zone wholly off the bed is not published', () => {
+    assert.equal(keepoutZoneToPublish(cfg({ slot1: { x: -500, y: -359.497, z: -57.5 } }), LIMITS), null);
+    assert.equal(keepoutZoneToPublish(cfg(), null), null);
+  });
+
+  test('Community (no keepout) and an older app are left alone', () => {
+    const { ctx, calls } = host({ setKeepoutZones: undefined });
+    assert.doesNotThrow(() => run(cfg(), ctx));
+    assert.deepEqual(calls.zones, []);
+    assert.doesNotThrow(() => run(cfg(), {}));
+    assert.doesNotThrow(() => run(cfg(), undefined));
+  });
+
+  test('the Wireless I/O gets its output roles when it is connected', () => {
+    const s = cfg({ clampAuxOutput: 'bridge:0', waterPumpOutput: 'bridge:3', waterPumpIdleSec: 300, rackCoverOutput: 'bridge:2' });
+    assert.deepEqual(bridgeRoleLines(s), ['pumpidle 300', 'role 0 drawbar', 'role 1 none', 'role 2 none', 'role 3 pump']);
+
+    const on = host({ dongle: { getDevices: () => [{ name: 'xio', connected: true }], send: (d, l) => on.calls.sent.push(`${d} ${l}`) } });
+    run(s, on.ctx);
+    assert.deepEqual(on.calls.sent, ['xio pumpidle 300', 'xio role 0 drawbar', 'xio role 1 none', 'xio role 2 none', 'xio role 3 pump']);
+
+    const off = host({ dongle: { getDevices: () => [{ name: 'xio', connected: false }], send: (d, l) => off.calls.sent.push(l) } });
+    run(s, off.ctx);
+    assert.deepEqual(off.calls.sent, [], 'nothing is sent to a bridge that is not there');
+  });
+
+  test('running it again publishes the same thing', () => {
+    const { ctx, calls } = host();
+    run(cfg(), ctx); run(cfg(), ctx);
+    assert.deepEqual(calls.zones[0], calls.zones[1]);
   });
 });
